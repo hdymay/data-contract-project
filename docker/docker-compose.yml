@@ -1,0 +1,80 @@
+# Docker Compose 설정
+version: '3.8'
+
+services:
+  # FastAPI 백엔드
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - redis
+    command: python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 분류 에이전트 워커
+  classification-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    command: python -m celery worker -A backend.core.celery_app -Q classification -l info --reload
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - redis
+
+  # 정합성 검증 에이전트 워커
+  consistency-validation-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    command: python -m celery worker -A backend.core.celery_app -Q consistency_validation -l info --reload
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - redis
+
+  # 리포트 에이전트 워커
+  report-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    command: python -m celery worker -A backend.core.celery_app -Q report -l info --reload
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    volumes:
+      - ./data:/app/data
+      - ./backend:/app/backend
+    depends_on:
+      - redis
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
