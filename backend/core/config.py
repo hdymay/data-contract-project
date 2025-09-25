@@ -31,8 +31,7 @@ class Settings:
     FAISS_INDEX_PATH: str = os.getenv("FAISS_INDEX_PATH", "./data/embeddings/faiss_index")
     WHOOSH_INDEX_PATH: str = os.getenv("WHOOSH_INDEX_PATH", "./data/embeddings/whoosh_index")
     
-    # 환경 설정
-    ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
-    DEBUG: bool = os.getenv("DEBUG", "True").lower() == "true"
+    # 개발 환경 설정
+    DEBUG: bool = True
 
 settings = Settings()

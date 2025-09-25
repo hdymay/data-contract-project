@@ -1,4 +1,3 @@
-# Docker Compose 설정
 version: '3.8'
 
 services:
