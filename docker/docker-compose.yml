@@ -1,7 +1,8 @@
 version: '3.8'
 
 services:
-  # FastAPI 백엔드
+
+  # FastAPI
   fast-api:
     build:
       context: ..
