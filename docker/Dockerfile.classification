@@ -1,0 +1,28 @@
+# 분류 에이전트 워커용 Dockerfile
+FROM python:3.11-slim
+
+# 시스템 의존성
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 작업 디렉토리
+WORKDIR /app
+
+# Python 의존성
+COPY requirements/requirements.txt .
+COPY requirements/requirements-classification.txt .
+RUN pip install --no-cache-dir -r requirements-classification.txt
+
+# PYTHONPATH 설정
+ENV PYTHONPATH=/app
+
+COPY backend/classification_agent/ ./backend/classification_agent/
+COPY backend/shared/ ./backend/shared/
+COPY data/ ./data/
+
+# Celery 워커 실행
+CMD ["python", "-m", "celery", "-A", "backend.shared.core.celery_app:celery_app", "worker", "-Q", "classification", "-l", "info"]

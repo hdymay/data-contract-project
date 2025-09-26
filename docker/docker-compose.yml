@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   # FastAPI 백엔드
-  backend:
+  fast-api:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
@@ -13,25 +13,26 @@ services:
       - DATABASE_URL=sqlite:///./data/database/contracts.db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - ./data:/app/data
-      - ./backend:/app/backend
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
     depends_on:
       - redis
-    command: python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+    command: python -m uvicorn backend.fastapi.main:app --host 0.0.0.0 --port 8000 --reload
 
   # 분류 에이전트 워커
   classification-worker:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.backend
-    command: python -m celery worker -A backend.core.celery_app -Q classification -l info --reload
+      dockerfile: docker/Dockerfile.classification
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - ./data:/app/data
-      - ./backend:/app/backend
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
     depends_on:
       - redis
 
@@ -39,15 +40,15 @@ services:
   consistency-validation-worker:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.backend
-    command: python -m celery worker -A backend.core.celery_app -Q consistency_validation -l info --reload
+      dockerfile: docker/Dockerfile.consistency
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - ./data:/app/data
-      - ./backend:/app/backend
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
     depends_on:
       - redis
 
@@ -55,15 +56,15 @@ services:
   report-worker:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.backend
-    command: python -m celery worker -A backend.core.celery_app -Q report -l info --reload
+      dockerfile: docker/Dockerfile.report
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - ./data:/app/data
-      - ./backend:/app/backend
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
     depends_on:
       - redis
 

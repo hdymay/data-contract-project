@@ -1,7 +1,7 @@
-# 개발용 Dockerfile
+# FastAPI용 Dockerfile
 FROM python:3.11-slim
 
-# 시스템 의존성 설치
+# 시스템 의존성
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
@@ -9,20 +9,22 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 작업 디렉토리 설정
+# 작업 디렉토리
 WORKDIR /app
 
-# Python 의존성 설치
+# Python 의존성
 COPY requirements/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements/requirements-backend.txt .
+RUN pip install --no-cache-dir -r requirements-backend.txt
 
-# 애플리케이션 코드 복사
-COPY backend/ ./backend/
-COPY scripts/ ./scripts/
-COPY data/ ./data/
+# PYTHONPATH 설정
+ENV PYTHONPATH=/app
 
-# 포트 노출
+COPY backend/fastapi/ ./backend/fastapi/
+COPY backend/shared/ ./backend/shared/
+COPY data/ ./data/ 
+
 EXPOSE 8000
 
-# 개발용 명령어 (자동 리로드)
-CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# 작업 디렉토리를 backend로 변경하고 실행
+CMD ["python", "-m", "uvicorn", "backend.fastapi.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
