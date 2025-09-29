@@ -6,10 +6,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 import logging
 logger = logging.getLogger("uvicorn.error")
 
-try:
-    import fitz
-except Exception:
-    fitz = None
+from backend.fastapi.pdf_parser import (
+    parse_pdf_with_pymupdf
+)
 
 app = FastAPI()
 
@@ -19,11 +18,14 @@ async def root():
     return {"message": "FastAPI 서버 실행 중"}
 
 
-def get_upload_dir() -> Path:
-
-    base = Path("/app/data/uploads")
+def _temp_file_path(filename: str) -> Path:
+    # 메모리에서 바로 파싱할 수 있으면 좋지만, 현재 파서는 파일 경로 필요
+    # 컨테이너 내 임시 경로 사용 후 즉시 삭제
+    base = Path("/tmp/uploads")
     base.mkdir(parents=True, exist_ok=True)
-    return base
+    return base / filename
+
+
 
 
 @app.post("/upload")
@@ -33,36 +35,19 @@ async def upload_file(file: UploadFile = File(...)):
         if not filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="PDF 파일만 허용됩니다.")
 
-        target_dir = get_upload_dir()
-        target_path = target_dir / filename
-
+        temp_path = _temp_file_path(filename)
         content = await file.read()
-        with open(target_path, 'wb') as f:
+        with open(temp_path, 'wb') as f:
             f.write(content)
 
-        # 첫 페이지 텍스트 추출 (PyMuPDF)
-        extracted = None
-        if fitz is None:
-            logger.warning("PyMuPDF 미설치")
-        else:
-            try:
-                with fitz.open(target_path) as doc:
-                    if doc.page_count > 0:
-                        page = doc.load_page(0)
-                        extracted = page.get_text("text") or ""
-                        # 1000자 컷
-                        preview = extracted[:1000]
-                        logger.info("[PDF first page extract] %s\n%s", filename, preview)
-                    else:
-                        logger.info("PDF에 페이지가 없습니다: %s", filename)
-            except Exception as e:
-                logger.exception("PyMuPDF 처리 중 오류: %s", e)
+        # PyMuPDF 파싱만 사용
+        pymupdf_result = parse_pdf_with_pymupdf(temp_path)
 
         return {
             "success": True,
             "filename": filename,
-            "path": str(target_path),
-            "extracted_preview": (extracted[:200] if extracted else None)
+            # 서버 영구 저장 경로는 제공하지 않음
+            "pymupdf": pymupdf_result,
         }
     except HTTPException:
         raise

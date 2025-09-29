@@ -9,10 +9,11 @@ services:
       dockerfile: docker/Dockerfile.backend
     ports:
       - "8000:8000"
+    env_file:
+      - ../.env
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ../data:/app/data
       - ../data/search_indexes:/app/search_indexes
@@ -26,10 +27,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.classification
+    env_file:
+      - ../.env
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ../data:/app/data
       - ../data/search_indexes:/app/search_indexes
@@ -42,10 +44,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.consistency
+    env_file:
+      - ../.env
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ../data:/app/data
       - ../data/search_indexes:/app/search_indexes
@@ -58,10 +61,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.report
+    env_file:
+      - ../.env
     environment:
       - REDIS_URL=redis://redis:6379
       - DATABASE_URL=sqlite:///./data/database/contracts.db
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
       - ../data:/app/data
       - ../data/search_indexes:/app/search_indexes

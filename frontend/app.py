@@ -1,6 +1,3 @@
-import os
-from pathlib import Path
-
 import streamlit as st
 
 
@@ -10,23 +7,6 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
-
-
-def get_upload_dir() -> Path:
-    # 프로젝트 루트의 data/uploads 경로 보장
-    project_root = Path(__file__).resolve().parents[1]
-    upload_dir = project_root / "data" / "uploads"
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir
-
-
-def save_uploaded_file(uploaded_file) -> Path:
-    upload_dir = get_upload_dir()
-    safe_name = Path(uploaded_file.name).name
-    target_path = upload_dir / safe_name
-    with open(target_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return target_path
 
 
 def main() -> None:
@@ -60,7 +40,7 @@ def main() -> None:
                         st.write("파일명", f"`{data.get('filename')}`")
                     with col2:
                         st.write("크기", f"{len(file.getbuffer())/1024:.1f} KB")
-                    st.code(str(data.get("path")), language="bash")
+                    # 서버 저장 경로는 표시하지 않음 (프론트 로컬 저장 제거)
                 else:
                     st.error(f"업로드 실패: {resp.status_code} - {resp.text}")
             except Exception as e:
