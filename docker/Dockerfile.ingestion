@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+COPY requirements/requirements.txt ./
+COPY requirements/requirements-ingestion.txt ./
+RUN pip install --no-cache-dir -r requirements-ingestion.txt
+
+COPY ingestion/ ./ingestion/
+
+CMD ["python", "-m", "ingestion.ingest", "--help"]
+
+

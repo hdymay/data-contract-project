@@ -1,4 +1,3 @@
-# 리포트 에이전트 워커용 Dockerfile
 FROM python:3.11-slim
 
 # 시스템 의존성

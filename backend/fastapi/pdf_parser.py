@@ -83,7 +83,6 @@ def extract_structured_text_pymupdf(page: "fitz.Page", mode: str = "dict") -> Di
 
 
 def parse_pdf_with_pymupdf(path: Path) -> Dict[str, Any]:
-    """PyMuPDF로 1페이지 구조 추출(기본 휴리스틱)."""
     if fitz is None:
         logger.warning("PyMuPDF 미설치")
         return {"success": False, "error": "pymupdf_not_installed"}
@@ -93,38 +92,33 @@ def parse_pdf_with_pymupdf(path: Path) -> Dict[str, Any]:
             if doc.page_count == 0:
                 return {"success": True, "message": "empty_pdf", "structured_preview": None}
 
-            page = doc.load_page(0)
+            page = doc.load_page(5)
 
             # == text extract ==
-            # simple_text = page.get_text("text") or ""
-            # simple_preview = simple_text[:2000]
-            # logger.info("[PyMuPDF simple] %s\n%s", path.name, simple_preview)
+            simple_text = page.get_text("text") or ""
+            simple_preview = simple_text[:2000]
+            logger.info("[PyMuPDF simple] %s\n%s", path.name, simple_preview)
 
             # == dict extract ==
-            structured = extract_structured_text_pymupdf(page, mode="dict")
-            structured_preview = {
-                "headings": structured.get("headings", [])[:100],
-                "subheadings": structured.get("subheadings", [])[:100],
-                "body_preview": structured.get("body_preview", "")[:2000],
-            }
-            logger.info(
-                "[PyMuPDF structured] %s\nHeadings: %s\nSubheadings: %s\nBody: %s",
-                path.name,
-                ", ".join(structured_preview["headings"]),
-                ", ".join(structured_preview["subheadings"]),
-                structured_preview["body_preview"],
-            )
+            # structured = extract_structured_text_pymupdf(page, mode="dict")
+            # structured_preview = {
+            #     "headings": structured.get("headings", [])[:100],
+            #     "subheadings": structured.get("subheadings", [])[:100],
+            #     "body_preview": structured.get("body_preview", "")[:2000],
+            # }
+            # logger.info(
+            #     "[PyMuPDF structured] %s\nHeadings: %s\nSubheadings: %s\nBody: %s",
+            #     path.name,
+            #     ", ".join(structured_preview["headings"]),
+            #     ", ".join(structured_preview["subheadings"]),
+            #     structured_preview["body_preview"],
+            # )
 
-            return {
-                "success": True,
-                "structured_preview": structured_preview,
-                "extracted_preview": structured.get("body_preview", "")[:200],
-            }
+            # return {
+            #     "success": True,
+            #     "structured_preview": structured_preview,
+            #     "extracted_preview": structured.get("body_preview", "")[:200],
+            # }
     except Exception as e:  # pragma: no cover
         logger.exception("PyMuPDF 처리 중 오류: %s", e)
         return {"success": False, "error": str(e)}
-
-
-## MarkItDown 경로는 제거되었습니다.
-
-

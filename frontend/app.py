@@ -40,7 +40,7 @@ def main() -> None:
                         st.write("파일명", f"`{data.get('filename')}`")
                     with col2:
                         st.write("크기", f"{len(file.getbuffer())/1024:.1f} KB")
-                    # 서버 저장 경로는 표시하지 않음 (프론트 로컬 저장 제거)
+
                 else:
                     st.error(f"업로드 실패: {resp.status_code} - {resp.text}")
             except Exception as e:

@@ -73,6 +73,20 @@ services:
     depends_on:
       - redis
 
+  # docker compose --profile ingestion run --rm ingestion
+  ingestion:
+    profiles: ["ingestion"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ingestion
+    env_file:
+      - ../.env
+    volumes:
+      - ../ingestion:/app/ingestion
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+    command: python -m ingestion.ingest --input /app/data/database --out /app/data/search_indexes --mode full
+
   # Redis
   redis:
     image: redis:7-alpine
