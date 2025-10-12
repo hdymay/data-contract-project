@@ -72,6 +72,14 @@ data/uploads/*
 data/reports/*
 data/database/*.db
 data/embeddings/*
+data/search_indexes/*
+!data/search_indexes/README.md
+data/source_documents/*.pdf
+!data/source_documents/README.md
+data/extracted_documents/*
+!data/extracted_documents/README.md
+data/chunked_documents/*
+!data/chunked_documents/README.md
 logs/*
 !data/README.md
 !data/.gitkeep
@@ -84,6 +92,3 @@ logs/*
 
 # pyenv
 .python-version
-
-# Streamlit
-.streamlit/
