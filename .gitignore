@@ -75,7 +75,6 @@ data/embeddings/*
 data/search_indexes/*/*
 !data/search_indexes/.gitkeep
 !data/search_indexes/*/.gitkeep
-data/source_documents/*.pdf
 !data/source_documents/.gitkeep
 data/extracted_documents/*
 !data/extracted_documents/.gitkeep

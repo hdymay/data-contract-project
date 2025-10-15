@@ -13,13 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class IngestionCLI(cmd.Cmd):
-    """지식베이스 구축 인터랙티브 CLI"""
+    """지식베이스 구축 CLI 모듈"""
     
     intro = """
 
 Commands:
   - run     : 작업 실행
-  - status  : 현재 디렉토리 상태 확인
+  - status  : 디렉토리 상태 확인
   - help    : 도움말
   - exit    : 종료
 
@@ -28,7 +28,7 @@ Commands:
     
     def __init__(self):
         super().__init__()
-        # 기본 경로 설정
+        # 경로 설정
         self.base_path = Path("/app/data")
         self.source_path = self.base_path / "source_documents"
         self.extracted_path = self.base_path / "extracted_documents"
@@ -45,22 +45,23 @@ Commands:
           
         예시:
           run --mode parsing --file create_std_contract.pdf
-          run -m parsing -f create_std_contract.pdf
+          run -m parsing -f create_std_contract.docx
           run -m full -f all
           run --mode chunking --file create_std_contract.json
           run -m embedding -f create_std_contract_chunks.jsonl
         
-        모드:
+        --mode 옵션:
           - full      : 전체 파이프라인 (파싱→청킹→임베딩→인덱싱)
-          - parsing   : PDF 파싱만
+          - parsing   : 문서 파싱만 (PDF/DOCX 자동 감지)
           - chunking  : JSON 청킹만
           - embedding : 임베딩 + 인덱싱
         
-        파일:
-          - all             : 모든 파일
+        --file 옵션:
+          - all             : 모든 파일 (PDF, DOCX 모두)
           - <filename>      : 특정 파일 하나
         
         참고:
+          - 파일 확장자 감지로 파서 자동 선택
           - 파일명에 'guidebook' 포함 → 활용안내서 모듈 사용
           - 그 외 파일 → 표준계약서 모듈 사용
         """
@@ -138,14 +139,15 @@ Commands:
         return 'guidebook' in filename.lower()
     
     def _run_full_pipeline(self, filename):
-        logger.info(" 전체 파이프라인 실행")
+        logger.info("=== 전체 파이프라인 실행 ===")
         self._run_parsing(filename)
         
         # 파싱 결과를 청킹 입력으로
         if filename == 'all':
             chunking_file = 'all'
         else:
-            chunking_file = filename.replace('.pdf', '.json')
+            # .pdf 또는 .docx를 .json으로 변환
+            chunking_file = filename.replace('.pdf', '.json').replace('.docx', '_structured.json')
         
         self._run_chunking(chunking_file)
         
@@ -153,15 +155,47 @@ Commands:
         if filename == 'all':
             embedding_file = 'all'
         else:
-            embedding_file = filename.replace('.pdf', '_chunks.jsonl')
+            # 확장자 제거 후 _chunks.jsonl 추가
+            base_name = filename.rsplit('.', 1)[0]
+            embedding_file = f"{base_name}_chunks.jsonl"
         
         self._run_embedding(embedding_file)
     
-    def _run_parsing(self, filename):
-        from ingestion.parsers.standard_contract_parser import StandardContractParser
-        # from ingestion.parsers.guidebook_parser import GuidebookParser
+    def _get_parser(self, filename: str, file_ext: str):
+        """
+        파일명과 확장자를 기반으로 적절한 파서 선택
         
-        logger.info(" === 1단계: 파싱 시작 ===")
+        Args:
+            filename: 파일명
+            file_ext: 파일 확장자 (.pdf, .docx 등)
+            
+        Returns:
+            파서 인스턴스
+        """
+        is_guidebook = self._is_guidebook(filename)
+        
+        # 확장자와 문서 유형에 따라 파서 선택
+        if file_ext == '.pdf':
+            if is_guidebook:
+                from ingestion.parsers.guidebook_pdf_parser import GuidebookPdfParser
+                return GuidebookPdfParser(), "활용안내서 PDF 파서"
+            else:
+                from ingestion.parsers.std_contract_pdf_parser import StdContractPdfParser
+                return StdContractPdfParser(), "표준계약서 PDF 파서"
+        
+        elif file_ext == '.docx':
+            if is_guidebook:
+                from ingestion.parsers.guidebook_docx_parser import GuidebookDocxParser
+                return GuidebookDocxParser(), "활용안내서 DOCX 파서"
+            else:
+                from ingestion.parsers.std_contract_docx_parser import StdContractDocxParser
+                return StdContractDocxParser(), "표준계약서 DOCX 파서"
+        
+        else:
+            raise ValueError(f"지원하지 않는 파일 형식: {file_ext}")
+    
+    def _run_parsing(self, filename):
+        logger.info("=== 1단계: 파싱 시작 ===")
         logger.info(f"  입력: {self.source_path}")
         logger.info(f"  출력: {self.extracted_path}")
         
@@ -169,53 +203,55 @@ Commands:
         self.extracted_path.mkdir(parents=True, exist_ok=True)
         
         if filename == 'all':
-            # 모든 파일 처리
-            pattern = "*.pdf"
-            files = list(self.source_path.glob(pattern))
-            logger.info(f"  처리할 파일: {len(files)}개")
+            # 모든 파일 처리 (PDF와 DOCX)
+            pdf_files = list(self.source_path.glob("*.pdf"))
+            docx_files = list(self.source_path.glob("*.docx"))
+            all_files = pdf_files + docx_files
             
-            for file in files:
-                is_guidebook = self._is_guidebook(file.name)
-                parser_type = "활용안내서 파서" if is_guidebook else "표준계약서 파서"
-                logger.info(f"    - {file.name} ({parser_type})")
+            logger.info(f"  처리할 파일: {len(all_files)}개 (PDF: {len(pdf_files)}, DOCX: {len(docx_files)})")
+            
+            for file in all_files:
+                file_ext = file.suffix.lower()
                 
-                if is_guidebook:
-                    logger.warning(f"        활용안내서 파서(미구현)")
-                    continue
-                else:
-                    # 표준계약서 파싱
-                    try:
-                        parser = StandardContractParser()
-                        parser.parse(file, self.extracted_path)
-                        logger.info(f"       파싱 완료")
-                    except Exception as e:
-                        logger.error(f"       파싱 실패: {e}")
+                try:
+                    parser, parser_name = self._get_parser(file.name, file_ext)
+                    logger.info(f"    - {file.name} ({parser_name})")
+                    
+                    parser.parse(file, self.extracted_path)
+                    logger.info(f"       [OK] 파싱 완료")
+                    
+                except ValueError as e:
+                    logger.error(f"       [ERROR] {e}")
+                except Exception as e:
+                    logger.error(f"       [ERROR] 파싱 실패: {e}")
+                    import traceback
+                    traceback.print_exc()
         else:
             # 특정 파일 처리
             file_path = self.source_path / filename
             if not file_path.exists():
-                logger.error(f"   파일을 찾을 수 없습니다: {filename}")
+                logger.error(f"   [ERROR] 파일을 찾을 수 없습니다: {filename}")
                 return
             
-            is_guidebook = self._is_guidebook(filename)
-            parser_type = "활용안내서 파서" if is_guidebook else "표준계약서 파서"
-            logger.info(f"  처리할 파일: {filename}")
-            logger.info(f"  사용 파서: {parser_type}")
+            file_ext = file_path.suffix.lower()
             
-            if is_guidebook:
-                logger.error(f"   활용안내서 파서(미구현)")
-                return
-            else:
-                # 표준계약서 파싱
-                try:
-                    parser = StandardContractParser()
-                    parser.parse(file_path, self.extracted_path)
-                    logger.info(f"   파싱 완료")
-                except Exception as e:
-                    logger.error(f"   파싱 실패: {e}")
+            try:
+                parser, parser_name = self._get_parser(filename, file_ext)
+                logger.info(f"  처리할 파일: {filename}")
+                logger.info(f"  사용 파서: {parser_name}")
+                
+                parser.parse(file_path, self.extracted_path)
+                logger.info(f"   [OK] 파싱 완료")
+                
+            except ValueError as e:
+                logger.error(f"   [ERROR] {e}")
+            except Exception as e:
+                logger.error(f"   [ERROR] 파싱 실패: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _run_chunking(self, filename):
-        logger.info("  === 2단계: 청킹 시작 ===")
+        logger.info("=== 2단계: 청킹 시작 ===")
         logger.info(f"  입력: {self.extracted_path}")
         logger.info(f"  출력: {self.chunked_path}")
         
@@ -249,7 +285,7 @@ Commands:
     
     def _run_embedding(self, filename):
         """임베딩 + 인덱싱 실행"""
-        logger.info(" === 3단계: 임베딩 시작 ===")
+        logger.info("=== 3단계: 임베딩 시작 ===")
         logger.info(f"  입력: {self.chunked_path}")
         
         # TODO: 임베딩 로직 구현
@@ -277,7 +313,7 @@ Commands:
         # TODO: 임베딩 로직 (동일한 임베더 사용)
         pass
         
-        logger.info("🔍 === 4단계: 인덱싱 시작 ===")
+        logger.info("=== 4단계: 인덱싱 시작 ===")
         logger.info(f"  출력: {self.index_path}")
         
         # TODO: 인덱싱 로직 (Whoosh + FAISS)
@@ -295,15 +331,16 @@ Commands:
         
         # source_documents
         pdf_files = list(self.source_path.glob("*.pdf")) if self.source_path.exists() else []
-        logger.info(f"\n\n원본 PDF ({self.source_path}):")
-        logger.info(f"  총 {len(pdf_files)}개 파일")
+        docx_files = list(self.source_path.glob("*.docx")) if self.source_path.exists() else []
+        logger.info(f"\n [원본 문서] ({self.source_path}):")
+        logger.info(f"  총 {len(pdf_files) + len(docx_files)}개 파일 (PDF: {len(pdf_files)}, DOCX: {len(docx_files)})")
         if '--detail' in arg:
-            for f in pdf_files:
+            for f in pdf_files + docx_files:
                 logger.info(f"    - {f.name}")
         
         # extracted_documents
         json_files = list(self.extracted_path.glob("*.json")) if self.extracted_path.exists() else []
-        logger.info(f"\n\n파싱 결과 ({self.extracted_path}):")
+        logger.info(f"\n [파싱 결과] ({self.extracted_path}):")
         logger.info(f"  총 {len(json_files)}개 파일")
         if '--detail' in arg:
             for f in json_files:
@@ -311,18 +348,70 @@ Commands:
         
         # chunked_documents
         jsonl_files = list(self.chunked_path.glob("*.jsonl")) if self.chunked_path.exists() else []
-        logger.info(f"\n\n청킹 결과 ({self.chunked_path}):")
+        logger.info(f"\n [청킹 결과] ({self.chunked_path}):")
         logger.info(f"  총 {len(jsonl_files)}개 파일")
         if '--detail' in arg:
             for f in jsonl_files:
                 logger.info(f"    - {f.name}")
         
         # search_indexes
-        has_whoosh = (self.index_path / "whoosh").exists()
-        has_faiss = (self.index_path / "faiss").exists()
-        logger.info(f"\n\n검색 인덱스 ({self.index_path}):")
-        logger.info(f"  Whoosh: {'✅' if has_whoosh else '❌'}")
-        logger.info(f"  FAISS: {'✅' if has_faiss else '❌'}")
+        whoosh_status = self._check_whoosh_index()
+        faiss_status = self._check_faiss_index()
+        
+        logger.info(f"\n [검색 인덱스] ({self.index_path}):")
+        logger.info(f"  Whoosh: {whoosh_status['icon']} {whoosh_status['message']}")
+        logger.info(f"  FAISS: {faiss_status['icon']} {faiss_status['message']}")
+    
+    def _check_whoosh_index(self) -> dict:
+        """
+        Whoosh 인덱스 파일 존재 확인
+        
+        Returns:
+            dict: {"icon": str, "message": str, "exists": bool}
+        """
+        whoosh_dir = self.index_path / "whoosh"
+        
+        # Whoosh 인덱스 필수 파일 체크
+        # _MAIN_*.toc 파일이 있으면 인덱스가 생성된 것
+        toc_files = list(whoosh_dir.glob("_MAIN_*.toc"))
+        
+        if not toc_files:
+            return {"icon": "X", "message": "인덱스 없음", "exists": False}
+        
+        # 세그먼트 파일도 확인
+        seg_files = list(whoosh_dir.glob("*.seg"))
+        
+        if toc_files and seg_files:
+            return {"icon": "O", "message": f"준비됨 ({len(toc_files)}개 TOC, {len(seg_files)}개 세그먼트)", "exists": True}
+        else:
+            return {"icon": "!", "message": "인덱스 불완전 (세그먼트 파일 없음)", "exists": False}
+    
+    def _check_faiss_index(self) -> dict:
+        """
+        FAISS 인덱스 파일 존재 확인
+        
+        Returns:
+            dict: {"icon": str, "message": str, "exists": bool}
+        """
+        faiss_dir = self.index_path / "faiss"
+        
+        # FAISS 인덱스 필수 파일 체크
+        # 일반적으로 .index 또는 .faiss 확장자 파일
+        index_files = list(faiss_dir.glob("*.index")) + list(faiss_dir.glob("*.faiss"))
+        
+        if not index_files:
+            return {"icon": "X", "message": "인덱스 없음", "exists": False}
+        
+        # 메타데이터 파일도 확인 (선택적)
+        metadata_files = list(faiss_dir.glob("*.json")) + list(faiss_dir.glob("*.pkl"))
+        
+        total_size = sum(f.stat().st_size for f in index_files) / (1024 * 1024)  # MB
+        
+        msg = f"준비됨 ({len(index_files)}개 파일, {total_size:.1f}MB"
+        if metadata_files:
+            msg += f", 메타데이터 {len(metadata_files)}개"
+        msg += ")"
+        return {"icon": "O", "message": msg, "exists": True}
     
     def do_ls(self, arg):
         """
