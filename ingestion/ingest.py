@@ -222,7 +222,7 @@ Commands:
                     logger.info(f"    - {file.name} ({parser_name})")
                     
                     parser.parse(file, self.extracted_path)
-                    logger.info(f"       [OK] 파싱 완료")
+                    logger.info(f"        파싱 완료")
                     
                 except ValueError as e:
                     logger.error(f"       [ERROR] {e}")

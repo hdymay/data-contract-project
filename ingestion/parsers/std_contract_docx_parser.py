@@ -157,9 +157,9 @@ class StdContractDocxParser:
     @staticmethod
     def parse_table_simple_docx(table) -> Dict[str, Any]:
         """
-        표를 간결한 구조로 변환 (병합 무시, 중복 허용)
+        테이블 구조 변환 (병합 무시, 중복 허용)
         
-        모든 셀을 독립적으로 처리하여 RAG 임베딩에 최적화
+        모든 셀을 독립적으로 처리
         마지막 행이 주석인 경우 notes 필드로 분리
         
         반환:
@@ -207,7 +207,7 @@ class StdContractDocxParser:
                     header_counts[h] = 0
                     headers.append(h)
             
-            # 데이터 행 파싱 (단순 매핑)
+            # 데이터 행 파싱
             data = []
             for row in data_rows:
                 row_dict = {}
