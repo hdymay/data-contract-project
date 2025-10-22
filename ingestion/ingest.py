@@ -48,15 +48,15 @@ Commands:
           run --mode parsing --file create_std_contract.pdf
           run -m parsing -f create_std_contract.docx
           run -m full -f all
-          run --mode chunking --file create_std_contract.json
-          run -m embedding -f create_std_contract_chunks.jsonl
+          run --mode art_chunking --file create_std_contract_structured.json
+          run -m embedding -f create_std_contract_art_chunks.jsonl
         
         --mode 옵션:
-          - full        : 전체 파이프라인 (파싱→청킹→임베딩→인덱싱)
-          - parsing     : 문서 파싱만 (PDF/DOCX 자동 감지)
-          - chunking    : JSON 청킹만
-          - embedding   : 임베딩 + 인덱싱
-          - s_embedding : 간이 청킹 및 임베딩 (조/별지 단위)
+          - full           : 전체 파이프라인 (파싱→청킹→임베딩→인덱싱)
+          - parsing        : 문서 파싱만 (PDF/DOCX 자동 감지)
+          - art_chunking   : 조/별지 단위 청킹
+          - embedding      : 임베딩 + 인덱싱
+          - s_embedding    : 간이 청킹 및 임베딩 (조/별지 단위)
         
         --file 옵션:
           - all             : 모든 파일 (PDF, DOCX 모두)
@@ -64,8 +64,8 @@ Commands:
         
         참고:
           - 파일 확장자 감지로 파서 자동 선택
-          - 파일명에 'guidebook' 포함 → 활용안내서 모듈 사용
-          - 그 외 파일 → 표준계약서 모듈 사용
+          - 파일명에 'guidebook' 포함 시 활용안내서 모듈 사용
+          - 그 외 파일은 표준계약서 모듈 사용
         """
         try:
             # 인자 파싱
@@ -87,8 +87,8 @@ Commands:
                 self._run_full_pipeline(filename)
             elif mode == 'parsing':
                 self._run_parsing(filename)
-            elif mode == 'chunking':
-                self._run_chunking(filename)
+            elif mode == 'art_chunking':
+                self._run_art_chunking(filename)
             elif mode == 'embedding':
                 self._run_embedding(filename)
             elif mode == 's_embedding':
@@ -115,9 +115,9 @@ Commands:
         while i < len(tokens):
             if tokens[i] in ['--mode', '-m'] and i + 1 < len(tokens):
                 mode = tokens[i + 1]
-                if mode not in ['full', 'parsing', 'chunking', 'embedding', 's_embedding']:
+                if mode not in ['full', 'parsing', 'art_chunking', 'embedding', 's_embedding']:
                     logger.error(f" 잘못된 모드: {mode}")
-                    logger.error("   사용 가능: full, parsing, chunking, embedding, s_embedding")
+                    logger.error("   사용 가능: full, parsing, art_chunking, embedding, s_embedding")
                     return None
                 args['mode'] = mode
                 i += 2
@@ -153,15 +153,15 @@ Commands:
             # .pdf 또는 .docx를 .json으로 변환
             chunking_file = filename.replace('.pdf', '.json').replace('.docx', '_structured.json')
         
-        self._run_chunking(chunking_file)
+        self._run_art_chunking(chunking_file)
         
         # 청킹 결과를 임베딩 입력으로
         if filename == 'all':
             embedding_file = 'all'
         else:
-            # 확장자 제거 후 _chunks.jsonl 추가
+            # 확장자 제거 후 _art_chunks.jsonl 추가
             base_name = filename.rsplit('.', 1)[0]
-            embedding_file = f"{base_name}_chunks.jsonl"
+            embedding_file = f"{base_name}_art_chunks.jsonl"
         
         self._run_embedding(embedding_file)
     
@@ -254,38 +254,82 @@ Commands:
                 import traceback
                 traceback.print_exc()
     
-    def _run_chunking(self, filename):
-        logger.info("=== 2단계: 청킹 시작 ===")
+    def _run_art_chunking(self, filename):
+        logger.info("=== 2단계: 조/별지 단위 청킹 시작 ===")
         logger.info(f"  입력: {self.extracted_path}")
         logger.info(f"  출력: {self.chunked_path}")
         
-        # TODO: 청킹 로직 구현
-        # from ingestion.processors.chunker import TextChunker
+        # 출력 디렉토리 생성
+        self.chunked_path.mkdir(parents=True, exist_ok=True)
+        
+        from ingestion.processors.art_chunker import ArticleChunker
         
         if filename == 'all':
-            pattern = "*.json"
+            pattern = "*_structured.json"
             files = list(self.extracted_path.glob(pattern))
             logger.info(f"  처리할 파일: {len(files)}개")
+            
             for file in files:
                 is_guidebook = self._is_guidebook(file.name)
-                chunker_type = "활용안내서 청커" if is_guidebook else "표준계약서 청커"
-                logger.info(f"    - {file.name} ({chunker_type})")
-                # TODO: 청킹 전략 선택
+                
+                if is_guidebook:
+                    logger.warning(f"    - {file.name} (활용안내서 청커 - 미구현, 건너뜀)")
+                    continue
+                
+                try:
+                    logger.info(f"    - {file.name} (조/별지 단위 청커)")
+                    
+                    # 청커 초기화 및 처리
+                    chunker = ArticleChunker()
+                    chunks = chunker.chunk_file(file)
+                    
+                    # 출력 파일명 생성 (provide_std_contract_structured.json -> provide_std_contract_art_chunks.json)
+                    output_name = file.name.replace('_structured.json', '_art_chunks.json')
+                    output_path = self.chunked_path / output_name
+                    
+                    # 청크 저장
+                    chunker.save_chunks(chunks, output_path)
+                    
+                    logger.info(f"        청킹 완료: {len(chunks)}개 청크 생성")
+                    
+                except Exception as e:
+                    logger.error(f"       [ERROR] 청킹 실패: {e}")
+                    import traceback
+                    traceback.print_exc()
         else:
             file_path = self.extracted_path / filename
             if not file_path.exists():
-                logger.error(f"   파일을 찾을 수 없습니다: {filename}")
+                logger.error(f"   [ERROR] 파일을 찾을 수 없습니다: {filename}")
                 return
             
             is_guidebook = self._is_guidebook(filename)
-            chunker_type = "활용안내서 청커" if is_guidebook else "표준계약서 청커"
-            logger.info(f"  처리할 파일: {filename}")
-            logger.info(f"  사용 청커: {chunker_type}")
             
-            # TODO: 청킹 전략 선택
-        
-        # TODO: 청킹 로직
-        pass
+            if is_guidebook:
+                logger.error(f"   [ERROR] 활용안내서 청커는 아직 구현되지 않았습니다")
+                return
+            
+            try:
+                logger.info(f"  처리할 파일: {filename}")
+                logger.info(f"  사용 청커: 조/별지 단위 청커")
+                
+                # 청커 초기화 및 처리
+                chunker = ArticleChunker()
+                chunks = chunker.chunk_file(file_path)
+                
+                # 출력 파일명 생성
+                output_name = filename.replace('_structured.json', '_art_chunks.json')
+                output_path = self.chunked_path / output_name
+                
+                # 청크 저장
+                chunker.save_chunks(chunks, output_path)
+                
+                logger.info(f"   [OK] 청킹 완료: {len(chunks)}개 청크 생성")
+                logger.info(f"   [OK] 출력 파일: {output_path}")
+                
+            except Exception as e:
+                logger.error(f"   [ERROR] 청킹 실패: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _run_embedding(self, filename):
         """임베딩 + 인덱싱 실행"""
@@ -296,7 +340,7 @@ Commands:
         # from ingestion.processors.embedder import TextEmbedder
         
         if filename == 'all':
-            pattern = "*.jsonl"
+            pattern = "*_art_chunks.json"
             files = list(self.chunked_path.glob(pattern))
             logger.info(f"  처리할 파일: {len(files)}개")
             for file in files:
@@ -608,7 +652,7 @@ Commands:
         디렉토리:
           - source    : 원본 PDF
           - extracted : 파싱 결과
-          - chunked   : 청킹 결과
+          - chunked   : 청킹 결과 (art_chunks.json)
           - index     : 인덱스
         """
         if not arg:
