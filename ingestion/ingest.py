@@ -55,6 +55,7 @@ Commands:
           - full           : 전체 파이프라인 (파싱→청킹→임베딩→인덱싱)
           - parsing        : 문서 파싱만 (PDF/DOCX 자동 감지)
           - art_chunking   : 조/별지 단위 청킹
+          - chunking       : 항/호 단위 청킹
           - embedding      : 임베딩 + 인덱싱
           - s_embedding    : 간이 청킹 및 임베딩 (조/별지 단위)
         
@@ -89,6 +90,8 @@ Commands:
                 self._run_parsing(filename)
             elif mode == 'art_chunking':
                 self._run_art_chunking(filename)
+            elif mode == 'chunking':
+                self._run_chunking(filename)
             elif mode == 'embedding':
                 self._run_embedding(filename)
             elif mode == 's_embedding':
@@ -115,9 +118,9 @@ Commands:
         while i < len(tokens):
             if tokens[i] in ['--mode', '-m'] and i + 1 < len(tokens):
                 mode = tokens[i + 1]
-                if mode not in ['full', 'parsing', 'art_chunking', 'embedding', 's_embedding']:
+                if mode not in ['full', 'parsing', 'art_chunking', 'chunking', 'embedding', 's_embedding']:
                     logger.error(f" 잘못된 모드: {mode}")
-                    logger.error("   사용 가능: full, parsing, art_chunking, embedding, s_embedding")
+                    logger.error("   사용 가능: full, parsing, art_chunking, chunking, embedding, s_embedding")
                     return None
                 args['mode'] = mode
                 i += 2
@@ -318,6 +321,83 @@ Commands:
                 
                 # 출력 파일명 생성
                 output_name = filename.replace('_structured.json', '_art_chunks.json')
+                output_path = self.chunked_path / output_name
+                
+                # 청크 저장
+                chunker.save_chunks(chunks, output_path)
+                
+                logger.info(f"   [OK] 청킹 완료: {len(chunks)}개 청크 생성")
+                logger.info(f"   [OK] 출력 파일: {output_path}")
+                
+            except Exception as e:
+                logger.error(f"   [ERROR] 청킹 실패: {e}")
+                import traceback
+                traceback.print_exc()
+    
+    def _run_chunking(self, filename):
+        logger.info("=== 2단계: 항/호 단위 청킹 시작 ===")
+        logger.info(f"  입력: {self.extracted_path}")
+        logger.info(f"  출력: {self.chunked_path}")
+        
+        # 출력 디렉토리 생성
+        self.chunked_path.mkdir(parents=True, exist_ok=True)
+        
+        from ingestion.processors.chunker import ClauseChunker
+        
+        if filename == 'all':
+            pattern = "*_structured.json"
+            files = list(self.extracted_path.glob(pattern))
+            logger.info(f"  처리할 파일: {len(files)}개")
+            
+            for file in files:
+                is_guidebook = self._is_guidebook(file.name)
+                
+                if is_guidebook:
+                    logger.warning(f"    - {file.name} (활용안내서 청커 - 미구현, 건너뜀)")
+                    continue
+                
+                try:
+                    logger.info(f"    - {file.name} (항/호 단위 청커)")
+                    
+                    # 청커 초기화 및 처리
+                    chunker = ClauseChunker()
+                    chunks = chunker.chunk_file(file)
+                    
+                    # 출력 파일명 생성 (provide_std_contract_structured.json -> provide_std_contract_chunks.json)
+                    output_name = file.name.replace('_structured.json', '_chunks.json')
+                    output_path = self.chunked_path / output_name
+                    
+                    # 청크 저장
+                    chunker.save_chunks(chunks, output_path)
+                    
+                    logger.info(f"        청킹 완료: {len(chunks)}개 청크 생성")
+                    
+                except Exception as e:
+                    logger.error(f"       [ERROR] 청킹 실패: {e}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            file_path = self.extracted_path / filename
+            if not file_path.exists():
+                logger.error(f"   [ERROR] 파일을 찾을 수 없습니다: {filename}")
+                return
+            
+            is_guidebook = self._is_guidebook(filename)
+            
+            if is_guidebook:
+                logger.error(f"   [ERROR] 활용안내서 청커는 아직 구현되지 않았습니다")
+                return
+            
+            try:
+                logger.info(f"  처리할 파일: {filename}")
+                logger.info(f"  사용 청커: 항/호 단위 청커")
+                
+                # 청커 초기화 및 처리
+                chunker = ClauseChunker()
+                chunks = chunker.chunk_file(file_path)
+                
+                # 출력 파일명 생성
+                output_name = filename.replace('_structured.json', '_chunks.json')
                 output_path = self.chunked_path / output_name
                 
                 # 청크 저장

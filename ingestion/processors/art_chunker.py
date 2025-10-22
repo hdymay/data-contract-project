@@ -541,8 +541,8 @@ class ArticleChunker:
             parts_norm.append(notes_norm)
         
         text_raw = '\n'.join(parts_raw)
-        # text_norm: 이미 개행이 제거된 상태이므로 그대로 반환
-        text_norm = ' '.join(parts_norm)
+        # text_norm: data의 각 요소와 notes를 //로 구분
+        text_norm = '//'.join(parts_norm)
         
         return text_raw, text_norm
     
