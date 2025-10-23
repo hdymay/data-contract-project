@@ -413,39 +413,98 @@ Commands:
     
     def _run_embedding(self, filename):
         """임베딩 + 인덱싱 실행"""
+        import os
+        from ingestion.processors.embedder import TextEmbedder
+
         logger.info("=== 3단계: 임베딩 시작 ===")
         logger.info(f"  입력: {self.chunked_path}")
-        
-        # TODO: 임베딩 로직 구현
-        # from ingestion.processors.embedder import TextEmbedder
-        
+        logger.info(f"  출력: {self.index_path}")
+
+        # Azure OpenAI API 키 및 엔드포인트 확인
+        api_key = os.getenv('AZURE_OPENAI_API_KEY')
+        azure_endpoint = os.getenv('AZURE_ENDPOINT')
+
+        if not api_key:
+            logger.error("   [ERROR] AZURE_OPENAI_API_KEY 환경변수가 설정되지 않았습니다")
+            return
+
+        if not azure_endpoint:
+            logger.error("   [ERROR] AZURE_ENDPOINT 환경변수가 설정되지 않았습니다")
+            return
+
+        # Azure OpenAI deployment name 확인 (선택사항, 기본값 사용 가능)
+        deployment_name = os.getenv('AZURE_EMBEDDING_DEPLOYMENT', 'text-embedding-3-large')
+
+        logger.info(f"  Azure Endpoint: {azure_endpoint}")
+        logger.info(f"  Deployment Name: {deployment_name}")
+
+        # TextEmbedder 초기화
+        embedder = TextEmbedder(
+            api_key=api_key,
+            azure_endpoint=azure_endpoint,
+            model=deployment_name
+        )
+
+        # 출력 디렉토리
+        faiss_output_dir = self.index_path / "faiss"
+        whoosh_output_dir = self.index_path / "whoosh"
+
         if filename == 'all':
-            pattern = "*_art_chunks.json"
+            pattern = "*_chunks.json"
             files = list(self.chunked_path.glob(pattern))
             logger.info(f"  처리할 파일: {len(files)}개")
+
             for file in files:
                 is_guidebook = self._is_guidebook(file.name)
-                doc_type = "활용안내서" if is_guidebook else "표준계약서"
-                logger.info(f"    - {file.name} ({doc_type})")
+
+                if is_guidebook:
+                    logger.warning(f"    - {file.name} (활용안내서 - 건너뜀)")
+                    continue
+
+                try:
+                    logger.info(f"    - {file.name} (표준계약서)")
+
+                    # 임베딩 및 FAISS/Whoosh 인덱스 생성
+                    success = embedder.process_file(file, faiss_output_dir, whoosh_output_dir)
+
+                    if not success:
+                        logger.error(f"       [ERROR] 임베딩 실패: {file.name}")
+                    else:
+                        logger.info(f"        임베딩 및 인덱싱 완료")
+
+                except Exception as e:
+                    logger.error(f"       [ERROR] 임베딩 실패: {e}")
+                    import traceback
+                    traceback.print_exc()
         else:
             file_path = self.chunked_path / filename
             if not file_path.exists():
-                logger.error(f"   파일을 찾을 수 없습니다: {filename}")
+                logger.error(f"   [ERROR] 파일을 찾을 수 없습니다: {filename}")
                 return
-            
+
             is_guidebook = self._is_guidebook(filename)
-            doc_type = "활용안내서" if is_guidebook else "표준계약서"
-            logger.info(f"  처리할 파일: {filename}")
-            logger.info(f"  문서 타입: {doc_type}")
-        
-        # TODO: 임베딩 로직 (동일한 임베더 사용)
-        pass
-        
-        logger.info("=== 4단계: 인덱싱 시작 ===")
-        logger.info(f"  출력: {self.index_path}")
-        
-        # TODO: 인덱싱 로직 (Whoosh + FAISS)
-        pass
+
+            if is_guidebook:
+                logger.error(f"   [ERROR] 활용안내서 임베딩은 아직 지원하지 않습니다")
+                return
+
+            try:
+                logger.info(f"  처리할 파일: {filename}")
+                logger.info(f"  문서 타입: 표준계약서")
+
+                # 임베딩 및 FAISS/Whoosh 인덱스 생성
+                success = embedder.process_file(file_path, faiss_output_dir, whoosh_output_dir)
+
+                if not success:
+                    logger.error(f"   [ERROR] 임베딩 실패")
+                    return
+
+                logger.info(f"   [OK] 임베딩 및 인덱싱 완료")
+
+            except Exception as e:
+                logger.error(f"   [ERROR] 임베딩 실패: {e}")
+                import traceback
+                traceback.print_exc()
     
     def _run_simple_embedding(self, filename):
         """

@@ -1,11 +1,33 @@
 FROM python:3.11-slim
 
+# 시스템 패키지 및 Mecab 설치
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     libffi-dev \
     libssl-dev \
+    curl \
+    git \
+    automake \
     && rm -rf /var/lib/apt/lists/*
+
+# Mecab 설치
+RUN apt-get update && apt-get install -y \
+    mecab \
+    libmecab-dev \
+    mecab-ipadic-utf8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Mecab 한국어 사전 설치 (mecab-ko-dic)
+RUN curl -LO https://bitbucket.org/eunjeon/mecab-ko-dic/downloads/mecab-ko-dic-2.1.1-20180720.tar.gz \
+    && tar -zxvf mecab-ko-dic-2.1.1-20180720.tar.gz \
+    && cd mecab-ko-dic-2.1.1-20180720 \
+    && ./autogen.sh \
+    && ./configure \
+    && make \
+    && make install \
+    && cd .. \
+    && rm -rf mecab-ko-dic-2.1.1-20180720 mecab-ko-dic-2.1.1-20180720.tar.gz
 
 WORKDIR /app
 
