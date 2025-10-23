@@ -522,24 +522,42 @@ class ArticleChunker:
         parts_raw = []
         parts_norm = []
         
-        # data 처리
+        # data 처리 - 각 row를 항목으로 그룹화
         if 'data' in table and isinstance(table['data'], list):
-            for row in table['data']:
+            for idx, row in enumerate(table['data'], 1):
                 if isinstance(row, dict):
+                    # 항목 헤더
+                    row_items_raw = [f"항목{idx}:"]
+                    row_items_norm = []
+                    
+                    # 각 key-value 쌍을 마크다운 리스트 형식으로
                     for key, value in row.items():
-                        if value:  # 빈 값이 아닌 경우만
-                            parts_raw.append(f"{key}: {value}")
-                            # text_norm에서는 개행 제거
-                            value_norm = str(value).replace('\n', ' ').strip()
-                            parts_norm.append(f"{key}: {value_norm}")
+                        # text_raw와 text_norm 모두 개행 제거
+                        key_clean = str(key).replace('\n', ' ').strip()
+                        value_str = str(value).replace('\n', ' ').strip()
+                        
+                        # 빈 값("")은 text_raw와 text_norm 모두 "..."로 표시
+                        if value_str:
+                            value_clean = value_str
+                        else:
+                            value_clean = "..."
+                        
+                        row_items_raw.append(f"- {key_clean}: {value_clean}")
+                        row_items_norm.append(f"{key_clean}: {value_clean}")
+                    
+                    # row 내 항목들을 줄바꿈으로 연결
+                    parts_raw.append('\n'.join(row_items_raw))
+                    # text_norm은 기존처럼 각 row의 모든 key-value를 하나로
+                    parts_norm.extend(row_items_norm)
         
         # notes 처리
         if 'notes' in table and table['notes']:
-            parts_raw.append(table['notes'])
-            # text_norm에서는 개행 제거
-            notes_norm = table['notes'].replace('\n', ' ').strip()
-            parts_norm.append(notes_norm)
+            # text_raw와 text_norm 모두 개행을 공백으로 변경
+            notes_clean = table['notes'].replace('\n', ' ').strip()
+            parts_raw.append(notes_clean)
+            parts_norm.append(notes_clean)
         
+        # text_raw: 항목별로 그룹화하여 줄바꿈으로 구분
         text_raw = '\n'.join(parts_raw)
         # text_norm: data의 각 요소와 notes를 //로 구분
         text_norm = '//'.join(parts_norm)

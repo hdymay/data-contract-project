@@ -1,18 +1,20 @@
 """
 항/호 단위 청킹 모듈
 표준계약서의 조의 하위항목 중 최상위 항목을 기준으로 청킹
+별지는 인덱스("1.", "2." 등)가 있으면 인덱스 단위로, 없으면 별지 전체 단위로 청킹
 """
 
 import json
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 
 class ClauseChunker:
     """
     항/호 단위 청커 (Clause-level Chunker)
     표준계약서의 structured.json 파일을 읽어서 조의 최상위 하위항목 단위로 청킹
+    별지도 적절한 단위로 청킹
     """
     
     def __init__(self):
@@ -75,6 +77,23 @@ class ClauseChunker:
                         )
                         if chunk:
                             chunks.append(chunk)
+        
+        # 별지 처리
+        if 'exhibits' in data and isinstance(data['exhibits'], list):
+            for exhibit in data['exhibits']:
+                exhibit_type = exhibit.get('type', '')
+                
+                if exhibit_type == '별지':
+                    exhibit_chunks = self._process_exhibit(
+                        exhibit,
+                        contract_type,
+                        source_file,
+                        order_index
+                    )
+                    for chunk in exhibit_chunks:
+                        order_index += 1
+                        chunk['order_index'] = order_index
+                        chunks.append(chunk)
         
         return chunks
     
@@ -477,6 +496,11 @@ class ClauseChunker:
             normalized = re.sub(r'^\s*[가-힣]\.\s*', '', normalized)
             return normalized
         
+        elif item_type == '별지 본문':
+            # "1. " 형태가 있으면 제거
+            normalized = re.sub(r'^\s*\d+\.\s*', '', normalized)
+            return normalized
+        
         return normalized
     
     def _process_table(self, table: Dict) -> Tuple[str, str]:
@@ -492,29 +516,345 @@ class ClauseChunker:
         parts_raw = []
         parts_norm = []
         
-        # data 처리
+        # data 처리 - 각 row를 항목으로 그룹화
         if 'data' in table and isinstance(table['data'], list):
-            for row in table['data']:
+            for idx, row in enumerate(table['data'], 1):
                 if isinstance(row, dict):
+                    # 항목 헤더
+                    row_items_raw = [f"항목{idx}:"]
+                    row_items_norm = []
+                    
+                    # 각 key-value 쌍을 마크다운 리스트 형식으로
                     for key, value in row.items():
-                        if value:  # 빈 값이 아닌 경우만
-                            parts_raw.append(f"{key}: {value}")
-                            # text_norm에서는 개행 제거
-                            value_norm = str(value).replace('\n', ' ').strip()
-                            parts_norm.append(f"{key}: {value_norm}")
+                        # text_raw와 text_norm 모두 개행 제거
+                        key_clean = str(key).replace('\n', ' ').strip()
+                        value_str = str(value).replace('\n', ' ').strip()
+                        
+                        # 빈 값("")은 text_raw와 text_norm 모두 "..."로 표시
+                        if value_str:
+                            value_clean = value_str
+                        else:
+                            value_clean = "..."
+                        
+                        row_items_raw.append(f"- {key_clean}: {value_clean}")
+                        row_items_norm.append(f"{key_clean}: {value_clean}")
+                    
+                    # row 내 항목들을 줄바꿈으로 연결
+                    parts_raw.append('\n'.join(row_items_raw))
+                    # text_norm은 기존처럼 각 row의 모든 key-value를 하나로
+                    parts_norm.extend(row_items_norm)
         
         # notes 처리
         if 'notes' in table and table['notes']:
-            parts_raw.append(table['notes'])
-            # text_norm에서는 개행 제거
-            notes_norm = table['notes'].replace('\n', ' ').strip()
-            parts_norm.append(notes_norm)
+            # text_raw와 text_norm 모두 개행을 공백으로 변경
+            notes_clean = table['notes'].replace('\n', ' ').strip()
+            parts_raw.append(notes_clean)
+            parts_norm.append(notes_clean)
         
+        # text_raw: 항목별로 그룹화하여 줄바꿈으로 구분
         text_raw = '\n'.join(parts_raw)
         # text_norm: data의 각 요소와 notes를 //로 구분
         text_norm = '//'.join(parts_norm)
         
         return text_raw, text_norm
+    
+    def _process_exhibit(
+        self,
+        exhibit: Dict,
+        contract_type: str,
+        source_file: str,
+        current_order_index: int
+    ) -> List[Dict[str, Any]]:
+        """
+        별지(exhibit) 처리
+        별지 본문에 "1.", "2." 등의 인덱스가 있으면 인덱스 단위로 청킹
+        없으면 별지 전체를 하나의 청크로 처리
+        
+        Args:
+            exhibit: 별지 딕셔너리
+            contract_type: 계약 유형
+            source_file: 원본 파일명
+            current_order_index: 현재 order_index
+            
+        Returns:
+            청크 리스트
+        """
+        exhibit_no = exhibit.get('number', 0)
+        exhibit_title = exhibit.get('title', '')
+        content_list = exhibit.get('content', [])
+        
+        # 별지 본문에서 인덱스가 있는지 확인
+        indexed_positions = self._find_indexed_exhibit_texts(content_list)
+        
+        if not indexed_positions:
+            # 인덱스가 없으면 별지 전체를 하나의 청크로
+            chunk = self._create_whole_exhibit_chunk(
+                exhibit_no,
+                exhibit_title,
+                content_list,
+                contract_type,
+                source_file,
+                current_order_index
+            )
+            return [chunk]
+        else:
+            # 인덱스가 있으면 인덱스 단위로 청킹
+            return self._create_indexed_exhibit_chunks(
+                exhibit_no,
+                exhibit_title,
+                content_list,
+                indexed_positions,
+                contract_type,
+                source_file,
+                current_order_index
+            )
+    
+    def _find_indexed_exhibit_texts(self, content_list: List[Dict]) -> List[Tuple[int, int]]:
+        """
+        별지 content에서 "1.", "2." 등의 인덱스로 시작하는 별지 본문의 위치 찾기
+        
+        Args:
+            content_list: 별지의 content 리스트
+            
+        Returns:
+            (인덱스 번호, content_list에서의 위치) 튜플 리스트
+        """
+        indexed_positions = []
+        
+        for idx, item in enumerate(content_list):
+            if item.get('type') == '별지 본문':
+                text = item.get('text', '').strip()
+                # "1.", "2." 등으로 시작하는지 확인
+                match = re.match(r'^\s*(\d+)\.\s+', text)
+                if match:
+                    index_num = int(match.group(1))
+                    indexed_positions.append((index_num, idx))
+        
+        return indexed_positions
+    
+    def _create_whole_exhibit_chunk(
+        self,
+        exhibit_no: int,
+        exhibit_title: str,
+        content_list: List[Dict],
+        contract_type: str,
+        source_file: str,
+        order_index: int
+    ) -> Dict[str, Any]:
+        """
+        별지 전체를 하나의 청크로 생성
+        
+        Args:
+            exhibit_no: 별지 번호
+            exhibit_title: 별지 제목
+            content_list: 별지의 content 리스트
+            contract_type: 계약 유형
+            source_file: 원본 파일명
+            order_index: 문서 내 순서
+            
+        Returns:
+            청크 딕셔너리
+        """
+        # ID 생성
+        chunk_id = f"별지{exhibit_no}"
+        global_id = f"urn:std:{contract_type}:ex:{exhibit_no:03d}"
+        
+        # title 추출
+        title = self._extract_title_from_exhibit_title(exhibit_title)
+        
+        # breadcrumb 생성
+        parent_id = f"별지{exhibit_no}"
+        
+        # text_raw와 text_norm 생성
+        text_raw_parts = [exhibit_title]  # 제목은 text_raw에만
+        text_norm_parts = []
+        anchors = []
+        
+        # content 처리
+        self._process_exhibit_content(
+            content_list,
+            text_raw_parts,
+            text_norm_parts,
+            anchors,
+            parent_id
+        )
+        
+        text_raw = '\n'.join(text_raw_parts)
+        # text_norm: 개행 제거, 앞뒤 공백 제거, //로 연결
+        text_norm_parts_cleaned = [part.replace('\n', ' ').strip() for part in text_norm_parts]
+        text_norm = '//'.join(text_norm_parts_cleaned)
+        
+        # 청크 생성
+        chunk = {
+            "id": chunk_id,
+            "global_id": global_id,
+            "unit_type": "exhibit",
+            "parent_id": parent_id,
+            "title": title,
+            "order_index": order_index,
+            "text_raw": text_raw,
+            "text_norm": text_norm,
+            "anchors": anchors,
+            "source_file": source_file
+        }
+        
+        return chunk
+    
+    def _create_indexed_exhibit_chunks(
+        self,
+        exhibit_no: int,
+        exhibit_title: str,
+        content_list: List[Dict],
+        indexed_positions: List[Tuple[int, int]],
+        contract_type: str,
+        source_file: str,
+        current_order_index: int
+    ) -> List[Dict[str, Any]]:
+        """
+        인덱스가 있는 별지를 인덱스 단위로 청킹
+        
+        Args:
+            exhibit_no: 별지 번호
+            exhibit_title: 별지 제목
+            content_list: 별지의 content 리스트
+            indexed_positions: 인덱스 위치 리스트
+            contract_type: 계약 유형
+            source_file: 원본 파일명
+            current_order_index: 현재 order_index
+            
+        Returns:
+            청크 리스트
+        """
+        chunks = []
+        title = self._extract_title_from_exhibit_title(exhibit_title)
+        parent_id = f"별지{exhibit_no}"
+        
+        # 각 인덱스 단위로 청킹
+        for i, (index_num, start_pos) in enumerate(indexed_positions):
+            # 다음 인덱스 위치 찾기
+            if i + 1 < len(indexed_positions):
+                end_pos = indexed_positions[i + 1][1]
+            else:
+                end_pos = len(content_list)
+            
+            # 해당 범위의 content 추출
+            chunk_content = content_list[start_pos:end_pos]
+            
+            # ID 생성
+            chunk_id = f"별지{exhibit_no}-{index_num}"
+            global_id = f"urn:std:{contract_type}:ex:{exhibit_no:03d}:idx:{index_num:03d}"
+            
+            # text_raw와 text_norm 생성
+            text_raw_parts = []
+            text_norm_parts = []
+            anchors = []
+            
+            # breadcrumb (예: "별지1-1")
+            breadcrumb = f"{parent_id}-{index_num}"
+            
+            # content 처리
+            self._process_exhibit_content(
+                chunk_content,
+                text_raw_parts,
+                text_norm_parts,
+                anchors,
+                breadcrumb
+            )
+            
+            text_raw = '\n'.join(text_raw_parts)
+            # text_norm: 개행 제거, 앞뒤 공백 제거, //로 연결
+            text_norm_parts_cleaned = [part.replace('\n', ' ').strip() for part in text_norm_parts]
+            text_norm = '//'.join(text_norm_parts_cleaned)
+            
+            # 청크 생성
+            chunk = {
+                "id": chunk_id,
+                "global_id": global_id,
+                "unit_type": "exhibitIndexed",
+                "parent_id": parent_id,
+                "title": title,
+                "order_index": current_order_index,  # 나중에 업데이트됨
+                "text_raw": text_raw,
+                "text_norm": text_norm,
+                "anchors": anchors,
+                "source_file": source_file
+            }
+            
+            chunks.append(chunk)
+        
+        return chunks
+    
+    def _process_exhibit_content(
+        self,
+        content_list: List[Dict],
+        text_raw_parts: List[str],
+        text_norm_parts: List[str],
+        anchors: List[Dict],
+        parent_breadcrumb: str
+    ):
+        """
+        별지 content 처리
+        
+        Args:
+            content_list: content 리스트
+            text_raw_parts: text_raw 파트 리스트 (참조로 수정)
+            text_norm_parts: text_norm 파트 리스트 (참조로 수정)
+            anchors: anchors 리스트 (참조로 수정)
+            parent_breadcrumb: 부모 breadcrumb
+        """
+        for item in content_list:
+            item_type = item.get('type', '')
+            
+            # offset 계산
+            offset_raw = len('\n'.join(text_raw_parts))
+            if text_raw_parts:
+                offset_raw += 1
+            
+            # text_norm의 offset은 //로 연결되므로 계산 방법이 다름
+            offset_norm = sum(len(part.replace('\n', ' ').strip()) for part in text_norm_parts)
+            if text_norm_parts:
+                offset_norm += len('//') * len(text_norm_parts)
+            
+            if item_type == '별지 본문':
+                item_text = item.get('text', '')
+                text_raw_parts.append(item_text)
+                text_norm = self._normalize_text(item_text, '별지 본문')
+                text_norm_parts.append(text_norm)
+                
+                anchors.append({
+                    "unit_type": "exhibitText",
+                    "offset_raw": offset_raw,
+                    "offset_norm": offset_norm,
+                    "breadcrumb": f"{parent_breadcrumb} 별지본문"
+                })
+            
+            elif item_type == '표':
+                table_text_raw, table_text_norm = self._process_table(item)
+                text_raw_parts.append(table_text_raw)
+                text_norm_parts.append(table_text_norm)
+                
+                anchors.append({
+                    "unit_type": "table",
+                    "offset_raw": offset_raw,
+                    "offset_norm": offset_norm,
+                    "breadcrumb": f"{parent_breadcrumb} 표"
+                })
+    
+    def _extract_title_from_exhibit_title(self, title: str) -> str:
+        """
+        별지 title에서 실제 title 추출
+        
+        Args:
+            title: 별지 title (예: [별지1] 대상데이터)
+            
+        Returns:
+            title (예: 대상데이터)
+        """
+        # [별지n] title 형식에서 title 추출
+        match = re.search(r'\[별지\d+\]\s*(.*)', title)
+        if match:
+            return match.group(1)
+        return title
     
     def save_chunks(self, chunks: List[Dict[str, Any]], output_path: Path):
         """
