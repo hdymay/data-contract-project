@@ -18,11 +18,12 @@ class IngestionCLI(cmd.Cmd):
     intro = """
 
 Commands:
-  - run     : 작업 실행
-  - search  : FAISS 검색 테스트
-  - status  : 디렉토리 상태 확인
-  - help    : 도움말
-  - exit    : 종료
+  - run       : 작업 실행
+  - search    : 하이브리드 검색 (FAISS + Whoosh BM25)
+  - s_search  : 간이 검색 (FAISS only)
+  - status    : 디렉토리 상태 확인
+  - help      : 도움말
+  - exit      : 종료
 
 """
     prompt = ' ingestion> '
@@ -556,26 +557,26 @@ Commands:
             logger.error("   [ERROR] 간이 청킹 및 임베딩 실패")
             return
     
-    def do_search(self, arg):
+    def do_s_search(self, arg):
         """
-        FAISS 검색 테스트
-        
+        간이 FAISS 검색 (Simple Search)
+
         사용법:
-          search --index <index_name> --query <query_text>
-          search -i <index_name> -q <query_text>
-          search -i <index_name> -q <query_text> --top <k>
-          
+          s_search --index <index_name> --query <query_text>
+          s_search -i <index_name> -q <query_text>
+          s_search -i <index_name> -q <query_text> --top <k>
+
         예시:
-          search -i provide_std_contract -q "질의"
-          search -i provide_std_contract -q "질의" --top 3
-        
+          s_search -i provide_std_contract -q "질의"
+          s_search -i provide_std_contract -q "질의" --top 3
+
         --index 옵션:
           - FAISS 인덱스 이름
           - 예: provide_std_contract
-        
+
         --query 옵션:
           - 검색할 질문
-          
+
         --top 옵션 (선택):
           - 반환할 결과 개수 (기본값: 5)
         """
@@ -686,7 +687,154 @@ Commands:
             return None
         
         return args
-    
+
+    def do_search(self, arg):
+        """
+        하이브리드 검색 (FAISS + Whoosh BM25)
+
+        사용법:
+          search --index <index_name> --query <query_text>
+          search -i <index_name> -q <query_text>
+          search -i <index_name> -q <query_text> --top <k>
+          search -i <index_name> -q <query_text> --top <k> --weight <dense_weight>
+
+        예시:
+          search -i provide_std_contract -q "계약 해지 조건"
+          search -i provide_std_contract -q "데이터 제공 범위" --top 5
+          search -i provide_std_contract -q "손해배상" --weight 0.8
+
+        --index 옵션:
+          - 인덱스 이름 (FAISS와 Whoosh 공통)
+          - 예: provide_std_contract
+
+        --query 옵션:
+          - 검색할 질문
+
+        --top 옵션 (선택):
+          - 반환할 결과 개수 (기본값: 10)
+
+        --weight 옵션 (선택):
+          - Dense 검색 가중치 0~1 (기본값: 0.7)
+          - Sparse 가중치 = 1 - dense_weight
+        """
+        try:
+            import os
+            from ingestion.processors.searcher import HybridSearcher
+
+            # 인자 파싱
+            args = self._parse_hybrid_search_args(arg)
+            if not args:
+                return
+
+            index_name = args.get('index')
+            query = args.get('query')
+            top_k = args.get('top', 10)
+            dense_weight = args.get('weight', 0.7)
+
+            # Azure OpenAI API 키 및 엔드포인트 확인
+            api_key = os.getenv('AZURE_OPENAI_API_KEY')
+            azure_endpoint = os.getenv('AZURE_ENDPOINT')
+            deployment_name = os.getenv('AZURE_EMBEDDING_DEPLOYMENT', 'text-embedding-3-large')
+
+            if not api_key or not azure_endpoint:
+                logger.error("   [ERROR] Azure OpenAI 환경변수가 설정되지 않았습니다")
+                return
+
+            # HybridSearcher 초기화
+            searcher = HybridSearcher(
+                api_key=api_key,
+                azure_endpoint=azure_endpoint,
+                embedding_model=deployment_name,
+                dense_weight=dense_weight
+            )
+
+            # 인덱스 로드
+            faiss_dir = self.index_path / "faiss"
+            whoosh_dir = self.index_path / "whoosh"
+
+            if not searcher.load_indexes(faiss_dir, whoosh_dir, index_name):
+                return
+
+            # 하이브리드 검색 수행
+            results = searcher.search(query, top_k=top_k)
+
+            # 결과 표시
+            searcher.display_results(results)
+
+            # 컨텍스트 추출 (LLM 사용 시 활용 가능)
+            if results:
+                context = searcher.get_context(results)
+                logger.info(f"\n  [INFO] LLM용 컨텍스트 길이: {len(context)} 문자")
+
+            logger.info("\n" + "=" * 60)
+            logger.info(" 하이브리드 검색 완료")
+            logger.info("=" * 60)
+
+        except Exception as e:
+            logger.error(f" 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _parse_hybrid_search_args(self, arg):
+        """하이브리드 search 명령어 인자 파싱"""
+        args = {}
+        tokens = arg.split()
+
+        i = 0
+        query_tokens = []
+        collecting_query = False
+
+        while i < len(tokens):
+            if tokens[i] in ['--index', '-i'] and i + 1 < len(tokens):
+                args['index'] = tokens[i + 1]
+                i += 2
+            elif tokens[i] in ['--query', '-q']:
+                collecting_query = True
+                i += 1
+            elif tokens[i] in ['--top', '-t'] and i + 1 < len(tokens):
+                try:
+                    args['top'] = int(tokens[i + 1])
+                except ValueError:
+                    logger.error(f" --top 값은 숫자여야 합니다: {tokens[i + 1]}")
+                    return None
+                collecting_query = False
+                i += 2
+            elif tokens[i] in ['--weight', '-w'] and i + 1 < len(tokens):
+                try:
+                    weight = float(tokens[i + 1])
+                    if not 0 <= weight <= 1:
+                        logger.error(f" --weight 값은 0~1 사이여야 합니다: {weight}")
+                        return None
+                    args['weight'] = weight
+                except ValueError:
+                    logger.error(f" --weight 값은 숫자여야 합니다: {tokens[i + 1]}")
+                    return None
+                collecting_query = False
+                i += 2
+            elif collecting_query:
+                # --top이나 --weight가 나올 때까지 모든 토큰을 쿼리로 수집
+                if tokens[i] in ['--top', '-t', '--weight', '-w']:
+                    collecting_query = False
+                    continue
+                query_tokens.append(tokens[i])
+                i += 1
+            else:
+                i += 1
+
+        # 쿼리 조립
+        if query_tokens:
+            args['query'] = ' '.join(query_tokens)
+
+        # 필수 인자 체크
+        if 'index' not in args:
+            logger.error(" --index (-i) 인자가 필요합니다")
+            return None
+        if 'query' not in args:
+            logger.error(" --query (-q) 인자가 필요합니다")
+            return None
+
+        return args
+
     def do_status(self, arg):
         """
         현재 디렉토리 상태 확인
