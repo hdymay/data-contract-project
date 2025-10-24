@@ -68,7 +68,7 @@ run --mode full --file all
 
 # 단계별 실행
 run --mode parsing --file document.pdf
-run --mode art_chunking --file document_structured.json
+run --mode chunking --file document_structured.json
 run --mode embedding --file document_art_chunks.json
 ```
 
