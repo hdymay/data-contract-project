@@ -35,7 +35,10 @@ def main() -> None:
                 
                 if resp.status_code == 200 and resp.json().get("success"):
                     data = resp.json()
+                    contract_id = data.get('contract_id')
+
                     st.success("업로드 및 파싱 성공")
+                    st.info(data.get('message', '분류 작업이 진행 중입니다.'))
 
                     # 파일 정보
                     col1, col2 = st.columns(2)
@@ -43,6 +46,8 @@ def main() -> None:
                         st.write("**파일명**", f"`{data.get('filename')}`")
                     with col2:
                         st.write("**크기**", f"{len(file.getbuffer())/1024:.1f} KB")
+
+                    st.write(f"**계약서 ID**: `{contract_id}`")
 
                     # 파싱 메타데이터
                     metadata = data.get('parsed_metadata', {})
@@ -85,6 +90,80 @@ def main() -> None:
                             st.markdown("<div style='height:2rem;'></div>", unsafe_allow_html=True)
                         else:
                             st.warning("조항을 찾을 수 없습니다.")
+
+                    # 분류 결과 섹션
+                    st.markdown("---")
+                    st.subheader("📋 계약서 분류 결과")
+
+                    # 분류 결과 조회 버튼
+                    if st.button("분류 결과 조회", type="primary"):
+                        with st.spinner("분류 결과를 조회하는 중..."):
+                            try:
+                                classification_url = f"http://localhost:8000/api/classification/{contract_id}"
+                                class_resp = requests.get(classification_url, timeout=30)
+
+                                if class_resp.status_code == 200:
+                                    classification = class_resp.json()
+
+                                    # 계약 유형 매핑
+                                    type_names = {
+                                        "provide": "데이터 제공 계약",
+                                        "create": "데이터 생성 계약",
+                                        "process": "데이터 가공 계약",
+                                        "brokerage_provider": "데이터 중개 계약 (제공자용)",
+                                        "brokerage_user": "데이터 중개 계약 (이용자용)"
+                                    }
+
+                                    predicted_type = classification.get('predicted_type')
+                                    confidence = classification.get('confidence', 0)
+                                    scores = classification.get('scores', {})
+
+                                    # 분류 결과 표시
+                                    st.success(f"✅ 분류 완료: **{type_names.get(predicted_type, predicted_type)}**")
+                                    st.write(f"**신뢰도**: {confidence:.2%}")
+
+                                    # 각 유형별 점수 표시
+                                    with st.expander("📊 유형별 유사도 점수"):
+                                        for ctype, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                                            st.write(f"- {type_names.get(ctype, ctype)}: {score:.3f}")
+
+                                    # 사용자 확인/수정 UI
+                                    st.markdown("### 분류 유형 확인")
+                                    st.write("AI가 분류한 유형이 맞는지 확인하거나 수정해주세요.")
+
+                                    # 드롭다운으로 유형 선택
+                                    confirmed_type = st.selectbox(
+                                        "계약서 유형",
+                                        options=list(type_names.keys()),
+                                        format_func=lambda x: type_names[x],
+                                        index=list(type_names.keys()).index(predicted_type) if predicted_type in type_names else 0
+                                    )
+
+                                    # 확인 버튼
+                                    if st.button("유형 확인", type="secondary"):
+                                        try:
+                                            confirm_url = f"http://localhost:8000/api/classification/{contract_id}/confirm?confirmed_type={confirmed_type}"
+                                            confirm_resp = requests.post(confirm_url, timeout=30)
+
+                                            if confirm_resp.status_code == 200:
+                                                if confirmed_type != predicted_type:
+                                                    st.success(f"✅ 유형이 **{type_names[confirmed_type]}**(으)로 수정되었습니다.")
+                                                else:
+                                                    st.success("✅ 분류 유형이 확인되었습니다.")
+
+                                                st.info("다음 단계: 정합성 검증이 진행됩니다. (미구현)")
+                                            else:
+                                                st.error(f"❌ 확인 실패: {confirm_resp.text}")
+                                        except Exception as e:
+                                            st.error(f"❌ 확인 오류: {e}")
+
+                                elif class_resp.status_code == 404:
+                                    st.warning("⏳ 분류 작업이 아직 완료되지 않았습니다. 잠시 후 다시 조회해주세요.")
+                                else:
+                                    st.error(f"❌ 분류 조회 실패: {class_resp.status_code} - {class_resp.text}")
+
+                            except Exception as e:
+                                st.error(f"❌ 분류 조회 오류: {e}")
 
                 else:
                     st.error(f"❌ 업로드 실패: {resp.status_code} - {resp.text}")
