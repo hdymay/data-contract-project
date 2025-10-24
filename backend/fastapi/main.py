@@ -10,7 +10,8 @@ import json
 logger = logging.getLogger("uvicorn.error")
 
 from backend.fastapi.user_contract_parser import UserContractParser
-from backend.shared.database import init_db, get_db, ContractDocument
+from backend.shared.database import init_db, get_db, ContractDocument, ClassificationResult
+from backend.classification_agent.agent import classify_contract_task
 
 app = FastAPI()
 
@@ -135,12 +136,24 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         db.commit()
         
         logger.info(f"계약서 저장 완료: {contract_id}")
-        
+
         # 임시 파일 삭제
         try:
             temp_path.unlink()
         except Exception as e:
             logger.warning(f"임시 파일 삭제 실패: {e}")
+
+        # Celery를 통해 분류 작업을 큐에 전송
+        try:
+            task = classify_contract_task.delay(contract_id)
+            logger.info(f"분류 작업 큐에 전송: {contract_id}, Task ID: {task.id}")
+
+            # 계약서 상태를 classifying으로 업데이트
+            contract_doc.status = "classifying"
+            db.commit()
+
+        except Exception as e:
+            logger.error(f"분류 작업 큐 전송 실패: {e}")
 
         return JSONResponse(
             content={
@@ -148,7 +161,8 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
                 "filename": filename,
                 "contract_id": contract_id,
                 "structured_data": result["structured_data"],
-                "parsed_metadata": result["parsed_metadata"]
+                "parsed_metadata": result["parsed_metadata"],
+                "message": "파싱 완료. 분류 작업이 백그라운드에서 진행 중입니다."
             },
             media_type="application/json; charset=utf-8"
         )
@@ -157,6 +171,154 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         raise
     except Exception as e:
         logger.exception(f"업로드 처리 중 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/classification/{contract_id}/start")
+async def start_classification(contract_id: str, db: Session = Depends(get_db)):
+    """
+    계약서 분류 시작 (수동 트리거)
+
+    Args:
+        contract_id: 계약서 ID
+        db: 데이터베이스 세션
+
+    Returns:
+        {
+            "success": bool,
+            "contract_id": str,
+            "task_id": str,
+            "message": str
+        }
+    """
+    try:
+        # 계약서 조회
+        contract = db.query(ContractDocument).filter(
+            ContractDocument.contract_id == contract_id
+        ).first()
+
+        if not contract:
+            raise HTTPException(status_code=404, detail="계약서를 찾을 수 없습니다")
+
+        if not contract.parsed_data:
+            raise HTTPException(status_code=400, detail="파싱된 데이터가 없습니다")
+
+        # Celery Task 큐에 전송
+        task = classify_contract_task.delay(contract_id)
+
+        # 계약서 상태 업데이트
+        contract.status = "classifying"
+        db.commit()
+
+        logger.info(f"분류 작업 큐에 전송: {contract_id}, Task ID: {task.id}")
+
+        return {
+            "success": True,
+            "contract_id": contract_id,
+            "task_id": task.id,
+            "message": "분류 작업이 시작되었습니다. /api/classification/{contract_id}로 결과를 조회하세요."
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"분류 시작 중 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/classification/{contract_id}")
+async def get_classification(contract_id: str, db: Session = Depends(get_db)):
+    """
+    분류 결과 조회
+
+    Args:
+        contract_id: 계약서 ID
+        db: 데이터베이스 세션
+
+    Returns:
+        분류 결과
+    """
+    try:
+        classification = db.query(ClassificationResult).filter(
+            ClassificationResult.contract_id == contract_id
+        ).first()
+
+        if not classification:
+            raise HTTPException(status_code=404, detail="분류 결과를 찾을 수 없습니다")
+
+        return {
+            "contract_id": classification.contract_id,
+            "predicted_type": classification.predicted_type,
+            "confidence": classification.confidence,
+            "scores": classification.scores,
+            "confirmed_type": classification.confirmed_type,
+            "user_override": classification.user_override
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"분류 조회 중 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/classification/{contract_id}/confirm")
+async def confirm_classification(
+    contract_id: str,
+    confirmed_type: str,
+    db: Session = Depends(get_db)
+):
+    """
+    사용자가 분류 유형 확인/수정
+
+    Args:
+        contract_id: 계약서 ID
+        confirmed_type: 사용자가 확인한 유형
+        db: 데이터베이스 세션
+
+    Returns:
+        {
+            "success": bool,
+            "contract_id": str,
+            "confirmed_type": str
+        }
+    """
+    try:
+        classification = db.query(ClassificationResult).filter(
+            ClassificationResult.contract_id == contract_id
+        ).first()
+
+        if not classification:
+            raise HTTPException(status_code=404, detail="분류 결과를 찾을 수 없습니다")
+
+        # 사용자가 변경한 경우 기록
+        if confirmed_type != classification.predicted_type:
+            classification.user_override = confirmed_type
+
+        classification.confirmed_type = confirmed_type
+
+        # 계약서 상태 업데이트
+        contract = db.query(ContractDocument).filter(
+            ContractDocument.contract_id == contract_id
+        ).first()
+
+        if contract:
+            contract.status = "classified_confirmed"
+
+        db.commit()
+
+        logger.info(f"분류 확인: {contract_id} -> {confirmed_type}")
+
+        return {
+            "success": True,
+            "contract_id": contract_id,
+            "confirmed_type": confirmed_type
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"분류 확인 중 오류: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
