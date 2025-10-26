@@ -277,7 +277,7 @@ REDIS_URL=redis://redis:6379
 
 # Azure OpenAI
 AZURE_OPENAI_API_KEY=your_api_key
-AZURE_ENDPOINT=your_endpoint
+AZURE_OPENAI_ENDPOINT=your_endpoint
 AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-large
 ```
 
