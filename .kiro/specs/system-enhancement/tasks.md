@@ -21,22 +21,22 @@
 
 - [x] 2. 사용자 계약서 처리 파이프라인
 - [x] 2.1 사용자 계약서 DOCX 파서 구현
-  - user_contract_parser.py 생성 완료
-  - 간단한 "제n조" 패턴 매칭 구현 (Phase 1)
-  - 서문(preamble) 수집 기능 추가
-  - 파싱 신뢰도 메타데이터 포함
+  - user_contract_parser.py 구현 완료
+  - "제n조" 패턴 매칭 기반 파싱 (Phase 1 간소화)
+  - 서문(preamble) 수집 및 메타데이터 생성
+  - SQLite DB 저장 및 JSON 구조화
   - _Requirements: 2.1, 2.2, 2.3_
 
-- [ ] 2.2 사용자 계약서 청킹
-  - 기존 ClauseChunker 재사용
-  - 항/호 단위 청킹 및 anchors 생성
+- [ ] 2.2 사용자 계약서 청킹 (Phase 2)
+  - 기존 ClauseChunker 재사용하여 항/호 단위 청킹
+  - anchors 생성 및 계층 구조 보존
   - _Requirements: 2.1, 2.2, 2.3_
-  - _Note: Phase 1에서는 청킹 없이 조 단위로만 처리_
+  - _Note: Phase 1에서는 조 단위 처리로 충분, Phase 2에서 구현_
 
-- [x] 2.3 FastAPI 엔드포인트 구현
-  - POST /upload: DOCX 파일 업로드 및 파싱 완료
-  - Redis Queue에 Classification 작업 자동 전달 완료
-  - 작업 상태 추적 로직 구현 완료
+- [x] 2.3 FastAPI 업로드 엔드포인트 구현
+  - POST /upload: DOCX 업로드, 파싱, DB 저장
+  - 자동 Classification 작업 큐 전송
+  - 업로드 상태 및 에러 처리
   - _Requirements: 2.1, 2.2, 2.3, 8.1, 8.2_
 
 - [x] 3. Classification Agent 구현
@@ -60,9 +60,10 @@
   - _Note: Consistency Agent 연동은 미구현_
 
 - [x] 3.4 프론트엔드 분류 확인 UI
-  - 분류 결과 표시 페이지 구현 완료
-  - 신뢰도 점수 및 유형별 점수 표시 완료
-  - 유형 변경 드롭다운 및 확인 버튼 완료
+  - Streamlit 기반 분류 결과 표시 페이지
+  - 유형별 유사도 점수 시각화
+  - 사용자 분류 수정 및 확인 인터페이스
+  - 실시간 폴링을 통한 분류 결과 조회
   - _Requirements: 3.4, 3.5, 3.6_
 
 - [ ] 4. Multi-Vector 검색 시스템 개선
@@ -167,15 +168,24 @@
   - 다운로드 버튼 UI
   - _Requirements: 7.4_
 
-- [x] 8. API 엔드포인트 구현
-- [x] 8.1 GET /api/classification/{contract_id}
-  - 분류 결과 및 신뢰도 반환 완료
+- [x] 8. API 엔드포인트 구현 (Phase 1)
+- [x] 8.1 POST /upload
+  - DOCX 파일 업로드 및 파싱
+  - 자동 분류 작업 큐 전송
+  - _Requirements: 2.1, 2.2, 2.3_
+
+- [x] 8.2 GET /api/knowledge-base/status
+  - 지식베이스 상태 확인 (인덱스 존재 여부)
+  - _Requirements: 1.1, 1.2, 1.3_
+
+- [x] 8.3 GET /api/classification/{contract_id}
+  - 분류 결과 및 신뢰도 점수 반환
   - _Requirements: 3.4, 3.5_
 
-- [x] 8.2 POST /api/classification/{contract_id}/confirm
-  - 사용자 선택 유형 저장 완료
+- [x] 8.4 POST /api/classification/{contract_id}/confirm
+  - 사용자 분류 확인 및 수정 저장
   - _Requirements: 3.5, 3.6_
-  - _Note: Consistency Agent 연동은 미구현_
+  - _Note: Consistency Agent 연동은 Phase 2에서 구현_
 
 - [ ] 8.3 GET /api/validation/{contract_id}/status
   - 검증 진행 상황 반환

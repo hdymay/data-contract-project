@@ -51,31 +51,58 @@ docker-compose -f docker/docker-compose.yml --profile ingestion run --rm ingesti
 
 ### 개발 서버 실행
 ```bash
+# 전체 시스템 실행 (권장)
+docker-compose -f docker/docker-compose.yml up -d
+
+# 개별 서비스 실행
 # FastAPI 백엔드 (포트 8000)
 python -m uvicorn backend.fastapi.main:app --host 0.0.0.0 --port 8000 --reload
 
-# Streamlit 프론트엔드
+# Streamlit 프론트엔드 (포트 8501)
 streamlit run frontend/app.py
+
+# Celery Worker (분류 작업 처리)
+celery -A backend.shared.core.celery_app worker --loglevel=info --queues=classification
+
+# Redis (메시지 큐)
+redis-server
 ```
 
 ### 문서 처리 파이프라인
 ```bash
-# 인제스션 CLI 실행
+# 지식베이스 구축 (표준계약서 5종)
+docker-compose -f docker/docker-compose.yml --profile ingestion run --rm ingestion
+
+# 또는 직접 실행
 python -m ingestion.ingest
 
-# 전체 파이프라인 실행 (파싱→청킹→임베딩)
+# 전체 파이프라인 실행 (파싱→청킹→임베딩→인덱싱)
 run --mode full --file all
 
 # 단계별 실행
-run --mode parsing --file document.pdf
-run --mode chunking --file document_structured.json
-run --mode embedding --file document_chunks.json
+run --mode parsing --file provide_std_contract.docx
+run --mode chunking --file provide_std_contract_structured.json
+run --mode embedding --file provide_std_contract_chunks.json
+run --mode indexing --file provide_std_contract_chunks.json
 ```
 
 ## 환경 변수
-- `AZURE_OPENAI_API_KEY`: Azure OpenAI API 키
-- `AZURE_OPENAI_ENDPOINT`: Azure OpenAI 엔드포인트
-- `AZURE_EMBEDDING_DEPLOYMENT`: 임베딩 모델 배포명
-- `AZURE_GPT_DEPLOYMENT`: GPT 모델 배포명
-- `REDIS_URL`: Redis 연결 URL
-- `DATABASE_URL`: SQLite 데이터베이스 경로
+```bash
+# Azure OpenAI 설정 (필수)
+AZURE_OPENAI_API_KEY=your_api_key_here
+AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
+AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+AZURE_GPT_DEPLOYMENT=gpt-4
+
+# Redis 설정
+REDIS_URL=redis://localhost:6379/0
+
+# 데이터베이스 설정
+DATABASE_URL=sqlite:///data/database/contracts.db
+
+# Celery 설정
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+```
+
+**중요**: Azure OpenAI 환경 변수가 설정되지 않으면 Classification Agent가 동작하지 않습니다.
