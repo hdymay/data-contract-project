@@ -21,7 +21,7 @@ ENV PYTHONPATH=/app
 
 COPY backend/consistency_agent/ ./backend/consistency_agent/
 COPY backend/shared/ ./backend/shared/
-COPY data/ ./data/
+COPY ingestion/ ./ingestion/
 
 # Celery 워커 실행
 CMD ["python", "-m", "celery", "-A", "backend.shared.core.celery_app:celery_app", "worker", "-Q", "consistency_validation", "-l", "info"]
