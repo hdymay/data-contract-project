@@ -54,6 +54,7 @@ venv.bak/
 # IDE
 .vscode/
 .idea/
+.kiro/
 *.swp
 *.swo
 *~
@@ -75,7 +76,10 @@ data/embeddings/*
 data/search_indexes/*/*
 !data/search_indexes/.gitkeep
 !data/search_indexes/*/.gitkeep
+data/source_documents/*
 !data/source_documents/.gitkeep
+data/user_contracts/*
+!data/user_contracts/.gitkeep
 data/extracted_documents/*
 !data/extracted_documents/.gitkeep
 data/chunked_documents/*
