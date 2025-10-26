@@ -423,14 +423,14 @@ Commands:
 
         # Azure OpenAI API 키 및 엔드포인트 확인
         api_key = os.getenv('AZURE_OPENAI_API_KEY')
-        azure_endpoint = os.getenv('AZURE_ENDPOINT')
+        azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
 
         if not api_key:
             logger.error("   [ERROR] AZURE_OPENAI_API_KEY 환경변수가 설정되지 않았습니다")
             return
 
         if not azure_endpoint:
-            logger.error("   [ERROR] AZURE_ENDPOINT 환경변수가 설정되지 않았습니다")
+            logger.error("   [ERROR] AZURE_OPENAI_ENDPOINT 환경변수가 설정되지 않았습니다")
             return
 
         # Azure OpenAI deployment name 확인 (선택사항, 기본값 사용 가능)
@@ -521,14 +521,14 @@ Commands:
         
         # Azure OpenAI API 키 및 엔드포인트 확인
         api_key = os.getenv('AZURE_OPENAI_API_KEY')
-        azure_endpoint = os.getenv('AZURE_ENDPOINT')
-        
+        azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
+
         if not api_key:
             logger.error("   [ERROR] AZURE_OPENAI_API_KEY 환경변수가 설정되지 않았습니다")
             return
-        
+
         if not azure_endpoint:
-            logger.error("   [ERROR] AZURE_ENDPOINT 환경변수가 설정되지 않았습니다")
+            logger.error("   [ERROR] AZURE_OPENAI_ENDPOINT 환경변수가 설정되지 않았습니다")
             return
         
         # structured.json 파일 경로 확인
@@ -601,7 +601,7 @@ Commands:
             
             # Azure OpenAI API 키 및 엔드포인트 확인
             api_key = os.getenv('AZURE_OPENAI_API_KEY')
-            azure_endpoint = os.getenv('AZURE_ENDPOINT')
+            azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
             deployment_name = os.getenv('AZURE_EMBEDDING_DEPLOYMENT', 'text-embedding-3-large')
             
             if not api_key or not azure_endpoint:
@@ -733,7 +733,7 @@ Commands:
 
             # Azure OpenAI API 키 및 엔드포인트 확인
             api_key = os.getenv('AZURE_OPENAI_API_KEY')
-            azure_endpoint = os.getenv('AZURE_ENDPOINT')
+            azure_endpoint = os.getenv('AZURE_OPENAI_ENDPOINT')
             deployment_name = os.getenv('AZURE_EMBEDDING_DEPLOYMENT', 'text-embedding-3-large')
 
             if not api_key or not azure_endpoint:
