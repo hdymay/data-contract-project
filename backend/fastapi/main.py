@@ -10,8 +10,9 @@ import json
 logger = logging.getLogger("uvicorn.error")
 
 from backend.fastapi.user_contract_parser import UserContractParser
-from backend.shared.database import init_db, get_db, ContractDocument, ClassificationResult
+from backend.shared.database import init_db, get_db, ContractDocument, ClassificationResult, ValidationResult
 from backend.classification_agent.agent import classify_contract_task
+from backend.consistency_agent.agent import validate_contract_task
 
 app = FastAPI()
 
@@ -319,6 +320,113 @@ async def confirm_classification(
         raise
     except Exception as e:
         logger.exception(f"분류 확인 중 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/validation/{contract_id}/start")
+async def start_validation(contract_id: str, db: Session = Depends(get_db)):
+    """
+    계약서 검증 시작 (A3 노드)
+    
+    Args:
+        contract_id: 계약서 ID
+        db: 데이터베이스 세션
+        
+    Returns:
+        {
+            "message": str,
+            "contract_id": str,
+            "task_id": str,
+            "status": str
+        }
+    """
+    try:
+        # 계약서 존재 확인
+        contract = db.query(ContractDocument).filter(
+            ContractDocument.contract_id == contract_id
+        ).first()
+        
+        if not contract:
+            raise HTTPException(status_code=404, detail="계약서를 찾을 수 없습니다")
+        
+        # 분류 완료 확인
+        classification = db.query(ClassificationResult).filter(
+            ClassificationResult.contract_id == contract_id
+        ).first()
+        
+        if not classification:
+            raise HTTPException(status_code=400, detail="계약서 분류가 완료되지 않았습니다")
+        
+        # 검증 작업 큐에 전송
+        task = validate_contract_task.delay(contract_id)
+        
+        logger.info(f"검증 작업 시작: {contract_id}, task_id: {task.id}")
+        
+        return {
+            "message": "검증이 시작되었습니다",
+            "contract_id": contract_id,
+            "task_id": task.id,
+            "status": "processing"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"검증 시작 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/validation/{contract_id}")
+async def get_validation_result(contract_id: str, db: Session = Depends(get_db)):
+    """
+    검증 결과 조회
+    
+    Args:
+        contract_id: 계약서 ID
+        db: 데이터베이스 세션
+        
+    Returns:
+        검증 결과
+    """
+    try:
+        # 검증 결과 조회
+        validation = db.query(ValidationResult).filter(
+            ValidationResult.contract_id == contract_id
+        ).first()
+        
+        if not validation:
+            return {
+                "contract_id": contract_id,
+                "status": "not_started",
+                "message": "검증이 시작되지 않았습니다"
+            }
+        
+        # A3 결과 확인
+        content_analysis = validation.content_analysis
+        
+        if not content_analysis or content_analysis.get('status') == 'pending':
+            return {
+                "contract_id": contract_id,
+                "status": "processing",
+                "message": "검증이 진행 중입니다"
+            }
+        
+        return {
+            "contract_id": contract_id,
+            "status": "completed",
+            "validation_result": {
+                "id": validation.id,
+                "overall_score": validation.overall_score,
+                "content_analysis": content_analysis,
+                "completeness_check": validation.completeness_check,
+                "checklist_validation": validation.checklist_validation,
+                "recommendations": validation.recommendations,
+                "created_at": validation.created_at.isoformat() if validation.created_at else None
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"검증 결과 조회 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
