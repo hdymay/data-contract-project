@@ -2,7 +2,7 @@
 
 ## 개요
 
-`ArticleChunker`는 표준계약서의 `*_structured.json` 파일을 입력으로 받아 조(article)와 별지(exhibit) 단위로 청킹하는 모듈.
+`ArticleChunker`는 표준계약서의 `*_structured.json` 파일을 입력으로 받아 조(article)와 별지(exhibit) 단위로 청킹하는 모듈.(테스트용. 운영시 실사용x)
 
 ## 출력 형식
 
