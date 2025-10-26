@@ -10,3 +10,10 @@ ipdb==0.13.13
 python-multipart==0.0.6
 pydantic==2.5.3
 pymupdf==1.23.14
+python-docx==1.1.0
+
+# 검증 엔진 의존성
+faiss-cpu==1.7.4
+rank-bm25==0.2.2
+openai>=1.30.0
+httpx<0.28.0

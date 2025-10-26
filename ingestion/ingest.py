@@ -11,6 +11,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# python ingestion/ingest.py
+# verify -u data/user_contract_sample_1.txt
+
 
 class IngestionCLI(cmd.Cmd):
     """지식베이스 구축 CLI 모듈"""
@@ -20,6 +23,7 @@ class IngestionCLI(cmd.Cmd):
 Commands:
   - run     : 작업 실행
   - search  : FAISS 검색 테스트
+  - verify  : 계약서 검증 (표준 계약서 대비 사용자 계약서 검증)
   - status  : 디렉토리 상태 확인
   - help    : 도움말
   - exit    : 종료
@@ -259,18 +263,30 @@ Commands:
         logger.info(f"  입력: {self.extracted_path}")
         logger.info(f"  출력: {self.chunked_path}")
         
-        # TODO: 청킹 로직 구현
-        # from ingestion.processors.chunker import TextChunker
+        from ingestion.processors.chunker import TextChunker
+        chunker = TextChunker(base_dir=self.base_path)
+        
+        def process_single(target_path: Path):
+            try:
+                chunker.process_file(target_path.name)
+                logger.info(f"   [OK] 청킹 완료: {target_path.name}")
+            except Exception as e:
+                logger.error(f"   [ERROR] 청킹 실패: {target_path.name} - {e}")
+                import traceback
+                traceback.print_exc()
         
         if filename == 'all':
-            pattern = "*.json"
-            files = list(self.extracted_path.glob(pattern))
+            files = sorted(self.extracted_path.glob("*.json"))
+            if not files:
+                logger.warning("  처리할 JSON 파일이 없습니다.")
+                return
+            
             logger.info(f"  처리할 파일: {len(files)}개")
             for file in files:
                 is_guidebook = self._is_guidebook(file.name)
-                chunker_type = "활용안내서 청커" if is_guidebook else "표준계약서 청커"
+                chunker_type = "활용 안내서 청커" if is_guidebook else "표준계약서 청커"
                 logger.info(f"    - {file.name} ({chunker_type})")
-                # TODO: 청킹 전략 선택
+                process_single(file)
         else:
             file_path = self.extracted_path / filename
             if not file_path.exists():
@@ -278,15 +294,11 @@ Commands:
                 return
             
             is_guidebook = self._is_guidebook(filename)
-            chunker_type = "활용안내서 청커" if is_guidebook else "표준계약서 청커"
+            chunker_type = "활용 안내서 청커" if is_guidebook else "표준계약서 청커"
             logger.info(f"  처리할 파일: {filename}")
             logger.info(f"  사용 청커: {chunker_type}")
             
-            # TODO: 청킹 전략 선택
-        
-        # TODO: 청킹 로직
-        pass
-    
+            process_single(file_path)
     def _run_embedding(self, filename):
         """임베딩 + 인덱싱 실행"""
         logger.info("=== 3단계: 임베딩 시작 ===")
@@ -639,6 +651,388 @@ Commands:
                 logger.info(f"  {f.name} ({size_kb:.1f} KB)")
             elif f.is_dir():
                 logger.info(f"   {f.name}/")
+    
+    def do_verify(self, arg):
+        """
+        계약서 검증 실행
+        
+        사용법:
+          verify --user <user_contract_path>
+          verify -u <user_contract_path>
+          verify -u <user_contract_path> --format <format>
+          
+        예시:
+          verify -u data/user_contract.txt
+          verify -u data/user_contract.docx
+          verify -u data/user_contract.docx --format pdf
+          verify -u data/user_contract.txt --format both
+        
+        --user 옵션:
+          - 사용자 계약서 파일 경로 (.txt 또는 .docx 파일)
+          
+        --format 옵션 (선택):
+          - text : 텍스트 보고서만 생성 (기본값)
+          - pdf  : PDF 보고서만 생성
+          - both : 텍스트 + PDF 보고서 모두 생성
+        
+        참고:
+          - 표준 계약서는 자동으로 data/chunked_documents/provide_std_contract_chunks.json 사용
+          - 하이브리드 검색 (BM25 + FAISS) + LLM 검증 파이프라인 사용
+          - 항 단위 청킹으로 정확도 향상
+          - 보고서는 data/reports/ 디렉토리에 저장됩니다
+        """
+        try:
+            # 인자 파싱
+            args = self._parse_verify_args(arg)
+            if not args:
+                return
+            
+            user_contract_path = args.get('user')
+            report_format = args.get('format', 'text')
+            
+            logger.info("=" * 60)
+            logger.info(" 계약서 검증 시작")
+            logger.info(f"  사용자 계약서: {user_contract_path}")
+            logger.info(f"  보고서 형식: {report_format}")
+            logger.info("=" * 60)
+            
+            # 검증 실행
+            self._run_verification(user_contract_path, report_format)
+            
+            logger.info("=" * 60)
+            logger.info(" 검증 완료")
+            logger.info("=" * 60)
+            
+        except Exception as e:
+            logger.error(f" 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _parse_verify_args(self, arg):
+        """verify 명령어 인자 파싱"""
+        args = {}
+        tokens = arg.split()
+        
+        i = 0
+        while i < len(tokens):
+            if tokens[i] in ['--user', '-u'] and i + 1 < len(tokens):
+                args['user'] = tokens[i + 1]
+                i += 2
+            elif tokens[i] in ['--format', '-f'] and i + 1 < len(tokens):
+                fmt = tokens[i + 1]
+                if fmt not in ['text', 'pdf', 'both']:
+                    logger.error(f" 잘못된 형식: {fmt}")
+                    logger.error("   사용 가능: text, pdf, both")
+                    return None
+                args['format'] = fmt
+                i += 2
+            else:
+                i += 1
+        
+        # 필수 인자 체크
+        if 'user' not in args:
+            logger.error(" --user (-u) 인자가 필요합니다")
+            return None
+        
+        return args
+    
+    def _group_results_by_article(self, match_results):
+        """매칭 결과를 조문별로 그룹화"""
+        article_groups = {}
+        
+        for match in match_results:
+            if match.is_matched:
+                # 조문 번호 추출 (예: "제1조 (목적)" → "제1조")
+                user_title = match.matched_clause.title
+                article_num = user_title.split()[0] if user_title.startswith('제') else user_title
+                
+                if article_num not in article_groups:
+                    article_groups[article_num] = []
+                
+                article_groups[article_num].append(match)
+        
+        return article_groups
+    
+    def _generate_detailed_report(self, report_path, result, grouped_results, user_clauses):
+        """상세 리포트 생성 (run_chunked_verification.py와 동일)"""
+        from datetime import datetime
+        
+        with open(report_path, 'w', encoding='utf-8') as f:
+            # 헤더
+            f.write("="*100 + "\n")
+            f.write("개선된 계약서 검증 보고서 (항 단위 청킹 + 조문별 그룹화)\n")
+            f.write("="*100 + "\n\n")
+            f.write(f"생성 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"검증 방식: 항 단위 청킹 → 표준 조문 매칭 → 조문별 그룹화\n\n")
+            
+            # 점수 해석 가이드
+            f.write("📖 점수 해석 가이드\n")
+            f.write("-" * 50 + "\n")
+            f.write("• BM25 점수: 키워드 매칭 점수 (높을수록 좋음, 0~1)\n")
+            f.write("• FAISS 유사도: 의미적 유사도 (높을수록 좋음, 0~100%)\n")
+            f.write("  - 계산: exp(-(거리^2)/2) × 100%\n")
+            f.write("  - 80%+: 매우 유사\n")
+            f.write("  - 60~80%: 어느 정도 유사\n")
+            f.write("  - 40~60%: 유사도 낮음\n")
+            f.write("  - 40% 미만: 매우 다름\n")
+            f.write("• 하이브리드: BM25(20%) + FAISS(80%) 결합 점수\n\n")
+            
+            # 요약 통계
+            f.write("📊 검증 결과 요약\n")
+            f.write("-" * 50 + "\n")
+            f.write(f"총 청크 수: {len(user_clauses)}개\n")
+            f.write(f"매칭된 청크: {result.matched_clauses}개\n")
+            f.write(f"매칭률: {result.matched_clauses/len(user_clauses)*100:.1f}%\n")
+            f.write(f"조문별 그룹: {len(grouped_results)}개\n\n")
+            
+            # 조문별 매칭 결과
+            f.write("📋 조문별 매칭 결과\n")
+            f.write("-" * 50 + "\n")
+            
+            for article_num in sorted(grouped_results.keys(), key=lambda x: int(x[1:-1]) if x[1:-1].isdigit() else 999):
+                matches = grouped_results[article_num]
+                f.write(f"\n🔸 {article_num} ({len(matches)}개 항 매칭)\n")
+                
+                for match in matches:
+                    f.write(f"   ✅ [{match.standard_clause.id}] {match.standard_clause.title}\n")
+                    f.write(f"      ← {match.matched_clause.title}\n")
+                    
+                    # 별지 참조 확인
+                    if "[별지" in match.standard_clause.text:
+                        f.write(f"      📎 별지 참조 있음\n")
+                    
+                    if match.llm_decision:
+                        f.write(f"      신뢰도: {match.llm_decision.confidence:.0%}\n")
+                    f.write(f"      하이브리드 점수: {match.hybrid_score:.3f}\n")
+                    # FAISS 유사도 계산: exp(-(distance^2)/2) * 100
+                    import numpy as np
+                    if match.faiss_raw_distance is not None:
+                        faiss_similarity = np.exp(-(match.faiss_raw_distance ** 2) / 2.0) * 100
+                        f.write(f"      BM25: {match.bm25_score:.3f} | FAISS 유사도: {faiss_similarity:.1f}%\n")
+                    else:
+                        f.write(f"      FAISS 점수: {match.faiss_score:.3f}\n")
+                    f.write("\n")
+            
+            # 상세 매칭 결과
+            f.write("\n" + "="*100 + "\n")
+            f.write("📝 상세 매칭 결과\n")
+            f.write("="*100 + "\n\n")
+            
+            for i, match in enumerate([m for m in result.match_results if m.is_matched], 1):
+                f.write(f"{i:2d}. 매칭 성공\n")
+                f.write(f"    표준 조문: [{match.standard_clause.id}] {match.standard_clause.title}\n")
+                
+                # 별지 참조 확인
+                if "[별지" in match.standard_clause.text:
+                    import re
+                    appendix_refs = re.findall(r'\[별지(\d+)\]', match.standard_clause.text)
+                    if appendix_refs:
+                        f.write(f"    📎 별지 참조: 별지{', 별지'.join(appendix_refs)}\n")
+                
+                f.write(f"    사용자 항: {match.matched_clause.title}\n")
+                
+                if match.llm_decision:
+                    f.write(f"    LLM 신뢰도: {match.llm_decision.confidence:.0%}\n")
+                    f.write(f"    LLM 판단: {match.llm_decision.reasoning}\n")
+                
+                f.write(f"    검색 점수:\n")
+                f.write(f"      - 하이브리드: {match.hybrid_score:.3f}\n")
+                # FAISS 유사도 계산
+                import numpy as np
+                if match.faiss_raw_distance is not None and match.bm25_raw_score is not None:
+                    f.write(f"      - BM25: {match.bm25_score:.3f} (원점수: {match.bm25_raw_score:.3f})\n")
+                    faiss_similarity = np.exp(-(match.faiss_raw_distance ** 2) / 2.0) * 100
+                    f.write(f"      - FAISS 유사도: {faiss_similarity:.1f}%\n")
+                else:
+                    f.write(f"      - FAISS 점수: {match.faiss_score:.3f}\n")
+                
+                f.write(f"\n    표준 조문 내용:\n")
+                f.write(f"    {match.standard_clause.text[:200]}...\n")
+                
+                f.write(f"\n    사용자 항 내용:\n")
+                f.write(f"    {match.matched_clause.text[:200]}...\n")
+                
+                f.write("\n" + "-"*80 + "\n\n")
+            
+            # 매칭되지 않은 표준 조문 (누락된 조문)
+            if result.missing_clauses:
+                f.write("❌ 매칭되지 않은 표준 조문 (누락)\n")
+                f.write("-" * 50 + "\n")
+                for clause in result.missing_clauses:
+                    f.write(f"   [{clause.id}] {clause.title}\n")
+                    f.write(f"   {clause.text[:100]}...\n\n")
+            
+            # 매칭되지 않은 사용자 항 (Top-3 후보와 함께 표시)
+            matched_user_ids = {m.matched_clause.id for m in result.match_results if m.is_matched}
+            unmatched_results = [m for m in result.match_results if not m.is_matched and m.matched_clause is not None]
+            
+            # 사용자 항별로 그룹화
+            from collections import defaultdict
+            unmatched_by_user = defaultdict(list)
+            for match in unmatched_results:
+                unmatched_by_user[match.matched_clause.id].append(match)
+            
+            if unmatched_by_user:
+                f.write("\n❓ 매칭되지 않은 사용자 항 (관련 조항 분석)\n")
+                f.write("=" * 100 + "\n\n")
+                
+                for user_id, matches in unmatched_by_user.items():
+                    # 사용자 항 정보
+                    user_clause = matches[0].matched_clause
+                    f.write(f"📄 {user_clause.title}\n")
+                    f.write(f"   {user_clause.text[:200]}...\n\n")
+                    
+                    f.write(f"   💭 관련 조항 분석 (Top {len(matches)}):\n")
+                    f.write("   " + "-" * 90 + "\n\n")
+                    
+                    # Top-3 후보 표시
+                    for idx, match in enumerate(matches[:3], 1):
+                        f.write(f"   {idx}️⃣ [{match.standard_clause.id}] {match.standard_clause.title}\n")
+                        f.write(f"      📊 유사도: {match.hybrid_score:.2f}\n")
+                        if match.llm_decision:
+                            f.write(f"      🤖 신뢰도: {match.llm_decision.confidence:.2f}\n")
+                            if match.llm_decision.reasoning:
+                                f.write(f"      💭 LLM 판단: {match.llm_decision.reasoning}\n")
+                        f.write("\n")
+                    
+                    f.write("\n")
+    
+    def _run_verification(self, user_contract_path: str, report_format: str):
+        """
+        계약서 검증 실행
+        
+        Args:
+            user_contract_path: 사용자 계약서 파일 경로
+            report_format: 보고서 형식 (text, pdf, both)
+        """
+        import sys
+        from pathlib import Path
+        
+        # backend 모듈 경로 추가
+        project_root = Path(__file__).parent.parent
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
+        from backend.clause_verification.node_1_clause_matching.data_loader import ContractDataLoader
+        from backend.clause_verification.node_1_clause_matching.verification_engine import ContractVerificationEngine
+        from backend.clause_verification.node_1_clause_matching.embedding_service import EmbeddingService
+        from backend.clause_verification.node_1_clause_matching.hybrid_search import HybridSearchEngine
+        from backend.clause_verification.node_1_clause_matching.llm_verification import LLMVerificationService
+        
+        # 표준 계약서 경로 (항 단위 청킹 버전)
+        standard_contract_path = "data/chunked_documents/provide_std_contract_chunks.json"
+        
+        # 파일 존재 확인
+        if not Path(standard_contract_path).exists():
+            logger.error(f"   [ERROR] 표준 계약서를 찾을 수 없습니다: {standard_contract_path}")
+            logger.error("   힌트: 먼저 'python embed_std_contract_articles.py'를 실행하세요")
+            return
+        
+        if not Path(user_contract_path).exists():
+            logger.error(f"   [ERROR] 사용자 계약서를 찾을 수 없습니다: {user_contract_path}")
+            return
+        
+        logger.info("\n=== 1단계: 데이터 로드 ===")
+        
+        # 데이터 로더 초기화
+        loader = ContractDataLoader()
+        
+        # 표준 계약서 로드
+        standard_clauses = loader.load_standard_contract()
+        logger.info(f"   [OK] 표준 계약서 로드: {len(standard_clauses)}개 조문")
+        
+        # 사용자 계약서 로드 (항 단위 청킹 방식)
+        # 여러 인코딩 시도
+        encodings = ['utf-8', 'cp949', 'euc-kr', 'utf-8-sig']
+        user_text = None
+        for encoding in encodings:
+            try:
+                with open(user_contract_path, 'r', encoding=encoding) as f:
+                    user_text = f.read()
+                logger.info(f"   [OK] 파일 인코딩 감지: {encoding}")
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if user_text is None:
+            logger.error(f"   [ERROR] 파일을 읽을 수 없습니다. 시도한 인코딩: {', '.join(encodings)}")
+            return
+        
+        user_clauses = loader.load_user_contract_chunked(user_text)
+        logger.info(f"   [OK] 사용자 계약서 로드: {len(user_clauses)}개 청크 (항 단위)")
+        
+        logger.info("\n=== 2단계: 검증 엔진 초기화 ===")
+        
+        # 서비스 초기화
+        embedding_service = EmbeddingService()
+        hybrid_search = HybridSearchEngine()  # 기본 가중치 사용 (BM25: 0.3, FAISS: 0.7)
+        
+        # 기존 인덱스 로드 시도 (없으면 자동 생성됨)
+        try:
+            hybrid_search.load_faiss_index()
+            logger.info("   [OK] 기존 FAISS 인덱스 로드")
+        except FileNotFoundError:
+            logger.info("   [INFO] FAISS 인덱스 없음 (검증 시 자동 생성됨)")
+        
+        llm_verification = LLMVerificationService()
+        
+        # 검증 엔진 초기화
+        engine = ContractVerificationEngine(
+            embedding_service=embedding_service,
+            hybrid_search=hybrid_search,
+            llm_verification=llm_verification
+        )
+        
+        logger.info("   [OK] 검증 엔진 초기화 완료")
+        
+        logger.info("\n=== 3단계: 계약서 검증 수행 ===")
+        
+        # 검증 수행 (역방향 검증: 사용자→표준)
+        result = engine.verify_contract_reverse(
+            standard_clauses=standard_clauses,
+            user_clauses=user_clauses,
+            top_k_candidates=10,
+            top_k_titles=5,
+            min_confidence=0.5
+        )
+        
+        logger.info(f"   [OK] 검증 완료")
+        logger.info(f"        - 표준 조문 수: {result.total_standard_clauses}")
+        logger.info(f"        - 사용자 청크 수: {result.total_user_clauses}")
+        logger.info(f"        - 매칭된 청크: {result.matched_clauses}")
+        logger.info(f"        - 누락된 조문: {result.missing_count}")
+        logger.info(f"        - 검증 완료율: {result.verification_rate:.1f}%")
+        
+        logger.info("\n=== 4단계: 결과 분석 및 그룹화 ===")
+        
+        # 조문별 그룹화
+        grouped_results = self._group_results_by_article(result.match_results)
+        logger.info(f"   [OK] 조문별 그룹: {len(grouped_results)}개")
+        
+        logger.info("\n=== 5단계: 상세 보고서 생성 ===")
+        
+        # 상세 보고서 생성
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_path = Path(f"data/reports/chunked_verification_report_{timestamp}.txt")
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        self._generate_detailed_report(report_path, result, grouped_results, user_clauses)
+        
+        logger.info(f"   [OK] 상세 보고서 저장: {report_path}")
+        
+        # 콘솔 요약 출력
+        summary = result.get_summary()
+        print("\n" + "="*80)
+        print("📋 계약서 검증 결과 요약")
+        print("="*80)
+        print(f"\n📊 통계:")
+        print(f"   총 청크 수: {len(user_clauses)}개")
+        print(f"   매칭된 청크: {summary['matched_clauses']}개")
+        print(f"   매칭률: {result.matched_clauses/len(user_clauses)*100:.1f}%")
+        print(f"   조문별 그룹: {len(grouped_results)}개")
+        print(f"\n📄 상세 보고서: {report_path}")
+        print("="*80)
     
     def do_exit(self, arg):
         logger.info("ingestion 종료")
