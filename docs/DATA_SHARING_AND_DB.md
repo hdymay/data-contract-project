@@ -279,6 +279,7 @@ REDIS_URL=redis://redis:6379
 AZURE_OPENAI_API_KEY=your_api_key
 AZURE_OPENAI_ENDPOINT=your_endpoint
 AZURE_EMBEDDING_DEPLOYMENT=text-embedding-3-large
+AZURE_GPT_DEPLOYMENT=gpt-4o
 ```
 
 ## 트러블슈팅

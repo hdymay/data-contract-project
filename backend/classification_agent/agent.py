@@ -36,22 +36,22 @@ class ClassificationAgent:
         self,
         api_key: str = None,
         azure_endpoint: str = None,
-        embedding_model: str = "text-embedding-3-large",
-        chat_model: str = "gpt-4",
+        embedding_model: str = None,
+        chat_model: str = None,
         api_version: str = "2024-02-01"
     ):
         """
         Args:
             api_key: Azure OpenAI API 키
             azure_endpoint: Azure OpenAI 엔드포인트
-            embedding_model: 임베딩 모델명
-            chat_model: GPT 모델명
+            embedding_model: 임베딩 모델 deployment 이름
+            chat_model: GPT 모델 deployment 이름
             api_version: API 버전
         """
         self.api_key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
         self.azure_endpoint = azure_endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
-        self.embedding_model = embedding_model
-        self.chat_model = chat_model
+        self.embedding_model = embedding_model or os.getenv("AZURE_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
+        self.chat_model = chat_model or os.getenv("AZURE_GPT_DEPLOYMENT", "gpt-4o")
 
         if not self.api_key or not self.azure_endpoint:
             raise ValueError("Azure OpenAI 자격 증명이 필요합니다")

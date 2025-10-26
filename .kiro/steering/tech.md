@@ -76,5 +76,6 @@ run --mode embedding --file document_chunks.json
 - `AZURE_OPENAI_API_KEY`: Azure OpenAI API 키
 - `AZURE_OPENAI_ENDPOINT`: Azure OpenAI 엔드포인트
 - `AZURE_EMBEDDING_DEPLOYMENT`: 임베딩 모델 배포명
+- `AZURE_GPT_DEPLOYMENT`: GPT 모델 배포명
 - `REDIS_URL`: Redis 연결 URL
 - `DATABASE_URL`: SQLite 데이터베이스 경로
