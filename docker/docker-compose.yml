@@ -1,0 +1,104 @@
+services:
+
+  # FastAPI
+  fast-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+    volumes:
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
+    depends_on:
+      - redis
+    command: python -m uvicorn backend.fastapi.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # 분류 에이전트 워커
+  classification-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.classification
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - WORKER_TYPE=classification
+    volumes:
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
+    depends_on:
+      - redis
+
+  # 정합성 검증 에이전트 워커
+  consistency-validation-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.consistency
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - WORKER_TYPE=consistency
+    volumes:
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
+    depends_on:
+      - redis
+
+  # 리포트 에이전트 워커
+  report-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.report
+    env_file:
+      - ../.env
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=sqlite:///./data/database/contracts.db
+      - WORKER_TYPE=report
+    volumes:
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../backend:/app/backend
+    depends_on:
+      - redis
+
+  # docker-compose --profile ingestion run --rm ingestion
+  ingestion:
+    profiles: ["ingestion"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.ingestion
+    env_file:
+      - ../.env
+    volumes:
+      - ../ingestion:/app/ingestion
+      - ../data:/app/data
+      - ../data/search_indexes:/app/search_indexes
+      - ../data/extracted_documents:/app/extracted_documents
+      - ../data/chunked_documents:/app/chunked_documents
+    command: python -m ingestion.ingest
+    stdin_open: true
+    tty: true
+
+  # Redis
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
