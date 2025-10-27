@@ -8,6 +8,7 @@ import numpy as np
 from typing import List, Dict, Any
 from collections import defaultdict
 from openai import AzureOpenAI
+from backend.shared.database import SessionLocal, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,14 @@ class HybridSearcher:
         
         logger.info(f"인덱스 로드 완료: {len(chunks)} chunks")
     
-    def embed_query(self, query: str) -> np.ndarray:
+    def embed_query(self, query: str, contract_id: str = None) -> np.ndarray:
         """
         쿼리를 임베딩 벡터로 변환
-        
+
         Args:
             query: 검색 쿼리
-            
+            contract_id: 계약서 ID (토큰 로깅용)
+
         Returns:
             임베딩 벡터 (numpy array)
         """
@@ -80,31 +82,45 @@ class HybridSearcher:
                 model=self.embedding_model,
                 input=query
             )
+
+            # 토큰 사용량 로깅
+            if hasattr(response, 'usage') and response.usage and contract_id:
+                self._log_token_usage(
+                    contract_id=contract_id,
+                    api_type="embedding",
+                    model=self.embedding_model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=0,
+                    total_tokens=response.usage.total_tokens,
+                    extra_info={"purpose": "article_matching_query"}
+                )
+
             embedding = response.data[0].embedding
             return np.array([embedding], dtype=np.float32)
-            
+
         except Exception as e:
             logger.error(f"쿼리 임베딩 실패: {e}")
             raise
     
-    def dense_search(self, query: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    def dense_search(self, query: str, top_k: int = 50, contract_id: str = None) -> List[Dict[str, Any]]:
         """
         Dense 검색 (FAISS 벡터 유사도)
-        
+
         Args:
             query: 검색 쿼리
             top_k: 반환할 결과 개수
-            
+            contract_id: 계약서 ID (토큰 로깅용)
+
         Returns:
             검색 결과 리스트
         """
         if self.faiss_index is None or self.chunks is None:
             logger.error("FAISS 인덱스가 로드되지 않았습니다")
             return []
-        
+
         try:
             # 쿼리 임베딩
-            query_vector = self.embed_query(query)
+            query_vector = self.embed_query(query, contract_id)
             
             # FAISS 검색
             distances, indices = self.faiss_index.search(
@@ -278,29 +294,31 @@ class HybridSearcher:
         query: str,
         top_k: int = 10,
         dense_top_k: int = 50,
-        sparse_top_k: int = 50
+        sparse_top_k: int = 50,
+        contract_id: str = None
     ) -> List[Dict[str, Any]]:
         """
         하이브리드 검색 수행
-        
+
         Args:
             query: 검색 쿼리
             top_k: 최종 반환할 결과 개수
             dense_top_k: Dense 검색에서 가져올 결과 수
             sparse_top_k: Sparse 검색에서 가져올 결과 수
-            
+            contract_id: 계약서 ID (토큰 로깅용)
+
         Returns:
             검색 결과 리스트 (청크 레벨)
         """
         if self.faiss_index is None or self.whoosh_indexer is None:
             logger.error("인덱스가 로드되지 않았습니다")
             return []
-        
+
         try:
             logger.debug(f"하이브리드 검색: {query[:100]}...")
-            
+
             # 1. Dense 검색
-            dense_results = self.dense_search(query, top_k=dense_top_k)
+            dense_results = self.dense_search(query, top_k=dense_top_k, contract_id=contract_id)
             logger.debug(f"  Dense: {len(dense_results)}개")
             
             # 2. Sparse 검색
@@ -321,3 +339,34 @@ class HybridSearcher:
             import traceback
             traceback.print_exc()
             return []
+
+    def _log_token_usage(
+        self,
+        contract_id: str,
+        api_type: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        extra_info: dict = None
+    ):
+        """토큰 사용량을 DB에 저장"""
+        try:
+            db = SessionLocal()
+            token_usage = TokenUsage(
+                contract_id=contract_id,
+                component="consistency_agent",
+                api_type=api_type,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                extra_info=extra_info
+            )
+            db.add(token_usage)
+            db.commit()
+            logger.info(f"토큰 사용량 로깅: {api_type} - {total_tokens} tokens")
+        except Exception as e:
+            logger.error(f"토큰 사용량 로깅 실패: {e}")
+        finally:
+            db.close()

@@ -58,68 +58,67 @@ class ArticleMatcher:
         self,
         user_article: Dict[str, Any],
         contract_type: str,
-        top_k: int = 5
+        top_k: int = 5,
+        contract_id: str = None
     ) -> Dict[str, Any]:
         """
         대응 조항 검색 (멀티벡터 방식)
-        
+
         각 하위항목별로:
         1. top_k 청크 검색
         2. 조별 평균 점수 계산
         3. 최고 점수 조 선정
-        
+
         최종적으로 하위항목별 결과를 조 단위로 집계
-        
+
+        정렬 순서:
+        1. 하위항목 개수 (많은 순)
+        2. 평균 유사도 (높은 순)
+        3. 조 번호 (낮은 순)
+
         Args:
             user_article: 사용자 조항 (content 배열 포함)
             contract_type: 계약 유형
             top_k: 청크 레벨 검색 결과 개수 (기본 5)
-            
+
         Returns:
             {
                 "matched": bool,
-                "matched_articles": List[Dict],  # 매칭된 조 목록 (여러 개 가능)
-                "primary_article": Dict,  # 최고 점수 조
+                "matched_articles": List[Dict],  # 매칭된 조 목록 (정렬됨, 여러 개 가능)
                 "sub_item_results": List[Dict],  # 하위항목별 결과
                 "is_special": bool
             }
         """
         user_article_no = user_article.get('number')
         user_article_title = user_article.get('title', '')
-        
+
         logger.info(f"조항 매칭 시작: 제{user_article_no}조 ({user_article_title})")
-        
+
         # 멀티벡터 검색
         matched_articles, sub_item_results = self._search_with_sub_items(
             user_article,
             contract_type,
-            top_k
+            top_k,
+            contract_id
         )
-        
+
         if not matched_articles:
             logger.warning(f"  매칭 실패: 검색 결과 없음")
             return {
                 "matched": False,
                 "matched_articles": [],
-                "primary_article": None,
                 "sub_item_results": sub_item_results,
                 "is_special": False
             }
-        
-        # Primary 조 (최고 점수)
-        primary_article = matched_articles[0]
-        
+
+        # 매칭 결과 로깅
         logger.info(f"  매칭 완료: {len(matched_articles)}개 조")
-        logger.info(f"  Primary: {primary_article['parent_id']} (유사도 {primary_article['score']:.3f})")
-        if len(matched_articles) > 1:
-            logger.info(f"  기타 매칭 조:")
-            for article in matched_articles[1:]:
-                logger.info(f"    - {article['parent_id']}: {article['score']:.3f} (하위항목 {article['num_sub_items']}개)")
-        
+        for i, article in enumerate(matched_articles, 1):
+            logger.info(f"    {i}. {article['parent_id']}: {article['score']:.3f} (하위항목 {article['num_sub_items']}개)")
+
         return {
             "matched": True,
-            "matched_articles": matched_articles,  # 모든 매칭 조
-            "primary_article": primary_article,  # 최고 점수 조
+            "matched_articles": matched_articles,  # 정렬된 모든 매칭 조
             "sub_item_results": sub_item_results,  # 하위항목별 결과
             "is_special": False
         }
@@ -128,7 +127,8 @@ class ArticleMatcher:
         self,
         user_article: Dict[str, Any],
         contract_type: str,
-        top_k: int = 5
+        top_k: int = 5,
+        contract_id: str = None
     ) -> tuple[List[Dict], List[Dict]]:
         """
         사용자 조항의 각 하위항목으로 검색
@@ -164,9 +164,9 @@ class ArticleMatcher:
             query = self._build_search_query(normalized, article_title)
             
             logger.debug(f"    하위항목 {idx} 검색: {query[:100]}...")
-            
+
             # 하이브리드 검색 수행 (top_k 청크)
-            chunk_results = self._hybrid_search(query, contract_type, top_k)
+            chunk_results = self._hybrid_search(query, contract_type, top_k, contract_id)
             
             if not chunk_results:
                 continue
@@ -283,23 +283,24 @@ class ArticleMatcher:
         self,
         query: str,
         contract_type: str,
-        top_k: int
+        top_k: int,
+        contract_id: str = None
     ) -> List[Dict]:
         """
         하이브리드 검색 수행 (FAISS + Whoosh)
-        
+
         Returns:
             검색 결과 청크 리스트
         """
         searcher = self._get_or_create_searcher(contract_type)
-        
+
         if not searcher:
             logger.error(f"Searcher를 생성할 수 없습니다: {contract_type}")
             return []
-        
+
         # 하이브리드 검색 수행
-        results = searcher.search(query, top_k=top_k)
-        
+        results = searcher.search(query, top_k=top_k, contract_id=contract_id)
+
         return results
     
     def _select_best_article_from_chunks(
@@ -363,36 +364,41 @@ class ArticleMatcher:
     ) -> List[Dict]:
         """
         하위항목별 매칭 결과를 조 단위로 집계
-        
+
         같은 조를 선택한 하위항목들의 점수를 평균내고,
         다른 조를 선택한 경우 모두 결과에 포함
-        
+
+        정렬 순서:
+        1. 하위항목 개수 (많은 순)
+        2. 평균 유사도 (높은 순)
+        3. 조 번호 (낮은 순)
+
         Args:
             sub_item_results: 하위항목별 매칭 결과
-            
+
         Returns:
-            조 단위 집계 결과 (점수 순 정렬)
+            조 단위 집계 결과 (정렬됨)
         """
         # 조별로 그룹화
         article_groups = defaultdict(list)
-        
+
         for result in sub_item_results:
             article_id = result['matched_article_id']
             article_groups[article_id].append(result)
-        
+
         # 조별 평균 점수 계산
         article_scores = []
-        
+
         for article_id, results in article_groups.items():
             # 평균 점수
             avg_score = sum(r['score'] for r in results) / len(results)
-            
+
             # 제목 (첫 번째 결과에서)
             title = results[0]['matched_article_title']
-            
+
             # 매칭된 하위항목 인덱스
             matched_sub_items = [r['sub_item_index'] for r in results]
-            
+
             # 모든 청크 수집 (중복 제거)
             all_chunks = []
             seen_chunk_ids = set()
@@ -402,7 +408,7 @@ class ArticleMatcher:
                     if chunk_id and chunk_id not in seen_chunk_ids:
                         all_chunks.append(chunk)
                         seen_chunk_ids.add(chunk_id)
-            
+
             article_scores.append({
                 'parent_id': article_id,
                 'title': title,
@@ -411,15 +417,37 @@ class ArticleMatcher:
                 'num_sub_items': len(results),
                 'matched_chunks': all_chunks
             })
-        
-        # 점수 순 정렬
-        article_scores.sort(key=lambda x: x['score'], reverse=True)
-        
+
+        # 정렬: 1. 하위항목 개수 (내림차순) → 2. 유사도 (내림차순) → 3. 조 번호 (오름차순)
+        article_scores.sort(key=lambda x: (
+            -x['num_sub_items'],  # 하위항목 개수 많은 순
+            -x['score'],          # 유사도 높은 순
+            self._extract_article_number(x['parent_id'])  # 조 번호 낮은 순
+        ))
+
         logger.debug(f"    조 단위 집계 완료: {len(article_scores)}개 조")
         for i, article in enumerate(article_scores, 1):
             logger.debug(f"      {i}. {article['parent_id']}: {article['score']:.3f} (하위항목: {article['num_sub_items']}개)")
-        
+
         return article_scores
+
+    def _extract_article_number(self, parent_id: str) -> int:
+        """
+        조 ID에서 숫자 추출 (정렬용)
+
+        예: "제3조" → 3, "제10조" → 10
+
+        Args:
+            parent_id: 조 ID (예: "제3조")
+
+        Returns:
+            조 번호 (숫자 추출 실패 시 999999)
+        """
+        import re
+        match = re.search(r'\d+', parent_id)
+        if match:
+            return int(match.group())
+        return 999999  # 숫자 추출 실패 시 뒤로 보냄
     
     def _build_article_chunk_count_map(self, contract_type: str):
         """
