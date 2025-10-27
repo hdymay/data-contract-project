@@ -11,28 +11,31 @@ from typing import List, Dict, Any, Optional
 @dataclass
 class ArticleAnalysis:
     """단일 조항 분석 결과"""
-    
+
     # 사용자 조항 정보
     user_article_no: int
     user_article_title: str
-    
+
     # 매칭 정보
     matched: bool
-    similarity: float  # Primary 조의 유사도
-    std_article_id: Optional[str] = None  # Primary 조 ID (예: "제5조")
-    std_article_title: Optional[str] = None  # Primary 조 제목
+    similarity: float  # 첫 번째 매칭 조의 유사도 (UI 표시용)
+    std_article_id: Optional[str] = None  # 첫 번째 매칭 조 ID (UI 표시용, 예: "제5조")
+    std_article_title: Optional[str] = None  # 첫 번째 매칭 조 제목 (UI 표시용)
     is_special: bool = False
-    
+
+    # 매칭된 모든 조 (정렬됨: 하위항목 개수 → 유사도 → 조 번호 순)
+    matched_articles: List[Dict[str, Any]] = field(default_factory=list)
+
     # 하위항목별 검색 결과
     sub_item_results: List[Dict[str, Any]] = field(default_factory=list)
-    
+
     # 제안
     suggestions: List[Dict[str, Any]] = field(default_factory=list)
-    
+
     # 메타데이터
     reasoning: str = ""
     analysis_timestamp: Optional[datetime] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """딕셔너리로 변환"""
         return {
@@ -43,6 +46,7 @@ class ArticleAnalysis:
             "std_article_id": self.std_article_id,
             "std_article_title": self.std_article_title,
             "is_special": self.is_special,
+            "matched_articles": self.matched_articles,
             "sub_item_results": self.sub_item_results,
             "suggestions": self.suggestions,
             "reasoning": self.reasoning,
