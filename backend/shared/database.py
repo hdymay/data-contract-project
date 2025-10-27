@@ -90,6 +90,22 @@ class Report(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class TokenUsage(Base):
+    """API 토큰 사용량 추적"""
+    __tablename__ = "token_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    contract_id = Column(String, index=True, nullable=False)
+    component = Column(String, nullable=False)  # classification_agent, consistency_agent
+    api_type = Column(String, nullable=False)  # chat_completion, embedding
+    model = Column(String, nullable=False)  # gpt-4o, text-embedding-3-large
+    prompt_tokens = Column(Integer, default=0)  # 입력 토큰 수
+    completion_tokens = Column(Integer, default=0)  # 출력 토큰 수 (chat completion만)
+    total_tokens = Column(Integer, default=0)  # 총 토큰 수
+    created_at = Column(DateTime, default=datetime.utcnow)
+    extra_info = Column(JSON, nullable=True)  # 추가 정보 (예: 작업 상세 내용)
+
+
 # 데이터베이스 초기화 함수
 def init_db():
     """데이터베이스 테이블 생성"""
