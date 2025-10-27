@@ -93,14 +93,26 @@ def main() -> None:
         with col_btn1:
             # 업로드하기 버튼 (분류 완료 시 secondary, 아니면 primary)
             upload_button_type = "secondary" if is_classification_done else "primary"
-            upload_clicked = st.button("업로드하기", type=upload_button_type, use_container_width=False)
+            upload_clicked = st.button("파일 업로드", type=upload_button_type, use_container_width=False)
 
         with col_btn3:
             # 분류 완료 후에만 검증 버튼 표시
             if is_classification_done:
                 validate_clicked = st.button("계약서 검증", type="primary", use_container_width=True)
                 if validate_clicked:
-                    start_validation(st.session_state.uploaded_contract_data['contract_id'])
+                    print("[DEBUG] 계약서 검증 버튼 클릭됨")
+                    # 검증 시작: 상태 초기화
+                    st.session_state.validation_started = True
+                    st.session_state.validation_completed = False
+
+                    # 기존 검증 결과 데이터 삭제
+                    if 'validation_result_data' in st.session_state:
+                        del st.session_state.validation_result_data
+
+                    # 검증 시작 플래그 설정
+                    st.session_state.validation_start_requested = True
+                    print(f"[DEBUG] validation_start_requested 설정됨: {st.session_state.validation_start_requested}")
+                    st.rerun()
 
         # 업로드 버튼 클릭 처리
         if upload_clicked:
@@ -143,6 +155,14 @@ def main() -> None:
     if st.session_state.uploaded_contract_data is not None:
         uploaded_data = st.session_state.uploaded_contract_data
         contract_id = uploaded_data['contract_id']
+
+        # 검증 시작 요청 처리 (버튼 클릭 후) - 최우선 처리
+        print(f"[DEBUG] validation_start_requested 체크: {st.session_state.get('validation_start_requested', False)}")
+        if st.session_state.get('validation_start_requested', False):
+            print("[DEBUG] validation_start_requested가 True임, start_validation 호출 예정")
+            st.session_state.validation_start_requested = False  # 플래그 초기화
+            start_validation(contract_id)
+            st.rerun()  # 상태 업데이트를 반영하기 위해 리렌더링
 
         st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
 
@@ -204,47 +224,73 @@ def main() -> None:
             }
             predicted_type = st.session_state.predicted_type
 
-            # 사용자가 수동으로 수정했는지 확인
-            if st.session_state.get('user_modified', False):
-                status_placeholder.success(f"분류 완료: **{type_names.get(predicted_type, predicted_type)}** (선택)")
+            # 검증 상태에 따라 다른 메시지 표시
+            if st.session_state.get('validation_completed', False):
+                # 검증 완료
+                status_placeholder.success("검증 완료")
             else:
-                confidence = st.session_state.confidence
-                status_placeholder.success(f"분류 완료: **{type_names.get(predicted_type, predicted_type)}** (신뢰도: {confidence:.1%})")
+                # 분류 완료 (검증 전 또는 검증 진행 중)
+                if st.session_state.get('user_modified', False):
+                    status_placeholder.success(f"분류 완료: **{type_names.get(predicted_type, predicted_type)}** (선택)")
+                else:
+                    confidence = st.session_state.confidence
+                    status_placeholder.success(f"분류 완료: **{type_names.get(predicted_type, predicted_type)}** (신뢰도: {confidence:.1%})")
 
         # 파싱 메타데이터
         metadata = uploaded_data['parsed_metadata']
 
         st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
 
-        # 분류 결과가 성공한 경우에만 유형 선택 UI 표시
-        if st.session_state.get('classification_done', False):
-            # 드롭다운으로 유형 선택
-            def on_type_change():
-                """드롭다운 선택 변경 시 호출되는 콜백"""
-                selected = st.session_state[f"contract_type_{contract_id}"]
-                original = st.session_state.get('predicted_type')
+        # 검증 스피너를 위한 placeholder (status_placeholder 바로 아래)
+        validation_spinner_placeholder = st.empty()
 
-                if selected != original:
-                    try:
-                        confirm_url = f"http://localhost:8000/api/classification/{contract_id}/confirm?confirmed_type={selected}"
-                        confirm_resp = requests.post(confirm_url, timeout=30)
+        # 검증 작업 진행 중 스피너 (placeholder에 표시)
+        if st.session_state.get('validation_started', False) and not st.session_state.get('validation_completed', False):
+            with validation_spinner_placeholder:
+                with st.spinner("검증 작업이 진행 중입니다..."):
+                    success, result = poll_validation_result(contract_id)
 
-                        if confirm_resp.status_code == 200:
-                            st.session_state.predicted_type = selected  # 업데이트
-                            st.session_state.user_modified = True  # 사용자가 수동으로 수정함
-                    except Exception:
-                        pass  # 오류 발생 시 무시
+                if success:
+                    # 검증 완료 - 결과를 session_state에 저장
+                    st.session_state.validation_completed = True
+                    st.session_state.validation_started = False  # 폴링 중지
+                    st.session_state.validation_result_data = result  # 결과 저장
+                    st.rerun()  # 상태 업데이트 후 리렌더링
+                else:
+                    # 검증 실패
+                    st.error(f"검증 실패: {result.get('error', '알 수 없는 오류')}")
+                    st.session_state.validation_started = False
+        else:
+            # 검증 진행 중이 아닐 때만 selectbox와 나머지 UI 표시
+            # 분류 결과가 성공한 경우에만 유형 선택 UI 표시
+            if st.session_state.get('classification_done', False):
+                # 드롭다운으로 유형 선택
+                def on_type_change():
+                    """드롭다운 선택 변경 시 호출되는 콜백"""
+                    selected = st.session_state[f"contract_type_{contract_id}"]
+                    original = st.session_state.get('predicted_type')
 
-            st.selectbox(
-                "계약서 유형",
-                options=list(type_names.keys()),
-                format_func=lambda x: type_names[x],
-                index=list(type_names.keys()).index(st.session_state.get('predicted_type', predicted_type)) if st.session_state.get('predicted_type', predicted_type) in type_names else 0,
-                key=f"contract_type_{contract_id}",
-                on_change=on_type_change
-            )
+                    if selected != original:
+                        try:
+                            confirm_url = f"http://localhost:8000/api/classification/{contract_id}/confirm?confirmed_type={selected}"
+                            confirm_resp = requests.post(confirm_url, timeout=30)
 
-        st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
+                            if confirm_resp.status_code == 200:
+                                st.session_state.predicted_type = selected  # 업데이트
+                                st.session_state.user_modified = True  # 사용자가 수동으로 수정함
+                        except Exception:
+                            pass  # 오류 발생 시 무시
+
+                st.selectbox(
+                    "계약서 유형",
+                    options=list(type_names.keys()),
+                    format_func=lambda x: type_names[x],
+                    index=list(type_names.keys()).index(st.session_state.get('predicted_type', predicted_type)) if st.session_state.get('predicted_type', predicted_type) in type_names else 0,
+                    key=f"contract_type_{contract_id}",
+                    on_change=on_type_change
+                )
+
+            st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
 
         # 계약서 구조 미리보기
         st.markdown('<p style="font-size: 0.875rem; font-weight: 400; margin-bottom: 0.5rem;">계약서 구조 미리보기</p>', unsafe_allow_html=True)
@@ -282,60 +328,55 @@ def main() -> None:
                 st.markdown("<div style='height:2rem;'></div>", unsafe_allow_html=True)
             else:
                 st.warning("조항을 찾을 수 없습니다.")
-        
+
         # 검증 결과 표시
-        if st.session_state.get('validation_started', False) and not st.session_state.get('validation_completed', False):
-            # 검증 진행 중 - 폴링 시작
-            with st.spinner("검증 작업이 진행 중입니다..."):
-                success, result = poll_validation_result(contract_id)
-            
-            if success:
-                # 검증 완료 - 결과 표시
-                st.session_state.validation_completed = True
-                st.session_state.validation_started = False  # 폴링 중지
-                st.success("검증이 완료되었습니다!")
-                display_validation_result(result)
+        if st.session_state.get('validation_completed', False):
+            # 이미 검증이 완료된 경우 - session_state에 저장된 결과 표시
+            if 'validation_result_data' in st.session_state:
+                display_validation_result(st.session_state.validation_result_data)
             else:
-                # 검증 실패
-                st.error(f"검증 실패: {result.get('error', '알 수 없는 오류')}")
-                st.session_state.validation_started = False
-        elif st.session_state.get('validation_completed', False):
-            # 이미 검증이 완료된 경우 - 저장된 결과 표시
-            try:
-                validation_url = f"http://localhost:8000/api/validation/{contract_id}"
-                resp = requests.get(validation_url, timeout=10)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if data.get('status') == 'completed':
-                        display_validation_result(data)
-                    # 검증 결과가 없으면 아무것도 표시하지 않음 (not_started 상태)
-            except Exception as e:
-                st.error(f"검증 결과 조회 실패: {str(e)}")
+                # fallback: API에서 조회
+                try:
+                    validation_url = f"http://localhost:8000/api/validation/{contract_id}"
+                    resp = requests.get(validation_url, timeout=10)
+
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if data.get('status') == 'completed':
+                            st.session_state.validation_result_data = data
+                            display_validation_result(data)
+                except Exception as e:
+                    st.error(f"검증 결과 조회 실패: {str(e)}")
 
 
 def start_validation(contract_id: str):
-    """검증 시작"""
+    """검증 시작 - API 호출"""
     try:
+        print(f"[DEBUG] start_validation 호출됨: contract_id={contract_id}")
         response = requests.post(
             f"http://localhost:8000/api/validation/{contract_id}/start",
             timeout=30
         )
-        
+        print(f"[DEBUG] 응답 status_code: {response.status_code}")
+
         if response.status_code == 200:
             result = response.json()
-            st.session_state.validation_started = True
-            st.session_state.validation_completed = False  # 이전 결과 초기화
+            print(f"[DEBUG] 응답 데이터: {result}")
             st.session_state.validation_task_id = result.get('task_id')
-            # 성공 메시지는 표시하지 않고 바로 폴링 시작
-            time.sleep(2)  # 백엔드가 작업을 시작할 시간 확보
-            st.rerun()
+            # 백엔드가 작업을 시작할 시간 확보
+            time.sleep(2)
         else:
             error_detail = response.json().get('detail', '알 수 없는 오류')
+            print(f"[DEBUG] 에러 발생: {error_detail}")
             st.error(f"검증 시작 실패: {error_detail}")
-            
+            # 실패 시 상태 초기화
+            st.session_state.validation_started = False
+
     except Exception as e:
+        print(f"[DEBUG] 예외 발생: {str(e)}")
         st.error(f"검증 시작 중 오류: {str(e)}")
+        # 오류 시 상태 초기화
+        st.session_state.validation_started = False
 
 
 def poll_validation_result(contract_id: str, max_attempts: int = 60, interval: int = 3):
@@ -383,113 +424,143 @@ def poll_validation_result(contract_id: str, max_attempts: int = 60, interval: i
 def display_validation_result(validation_data: dict):
     """검증 결과 표시"""
     st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
-    st.markdown("---")
+
     st.markdown("### 📋 검증 결과")
     
     validation_result = validation_data.get('validation_result', {})
     content_analysis = validation_result.get('content_analysis', {})
     
-    # 분석 통계
-    st.markdown("**📊 분석 통계**")
-    
     col1, col2 = st.columns(2)
     
     with col1:
         total_articles = content_analysis.get('total_articles', 0)
-        st.metric("전체 조항", f"{total_articles}개")
+        st.metric("전체 조문", f"{total_articles}개")
     
     with col2:
         analyzed_articles = content_analysis.get('analyzed_articles', 0)
         st.metric("분석 완료", f"{analyzed_articles}개")
     
+    st.markdown("---")
+    
     # 조항별 상세 분석
     article_analysis = content_analysis.get('article_analysis', [])
-    
+
     if article_analysis:
         st.markdown('<div style="height: 1rem;"></div>', unsafe_allow_html=True)
-        st.markdown("**📝 조항별 분석**")
-        
-        with st.expander(f"상세 분석 결과 ({len(article_analysis)}개 조항)", expanded=False):
-            for analysis in article_analysis:
-                user_article_no = analysis.get('user_article_no', 'N/A')
-                user_article_title = analysis.get('user_article_title', '')
-                matched = analysis.get('matched', False)
-                similarity = analysis.get('similarity', 0.0)
-                
-                st.markdown(f"**제{user_article_no}조** {user_article_title}")
-                
-                if matched:
-                    # Primary 조 정보
-                    std_article_id = analysis.get('std_article_id', '')
-                    std_article_title = analysis.get('std_article_title', '')
-                    st.markdown(f"**Primary 매칭**: {std_article_id} ({std_article_title}) - 유사도: {similarity:.1%}")
-                else:
-                    st.markdown(f"**매칭 결과**: 매칭 실패 (검색 결과 없음)")
-                
-                # 하위항목별 검색 결과
-                sub_item_results = analysis.get('sub_item_results', [])
-                if sub_item_results:
-                    # 하위항목별로 매칭된 조 집계
-                    matched_articles = {}
+
+        for analysis in article_analysis:
+            user_article_no = analysis.get('user_article_no', 'N/A')
+            user_article_title = analysis.get('user_article_title', '')
+            matched = analysis.get('matched', False)
+            similarity = analysis.get('similarity', 0.0)
+
+            st.markdown(f"<h3 style='margin-bottom: 0.5rem;'>제{user_article_no}조 {user_article_title}</h3>", unsafe_allow_html=True)
+
+            if matched:
+                # 첫 번째 매칭 조 (Primary)
+                std_article_id = analysis.get('std_article_id', '')
+                std_article_title = analysis.get('std_article_title', '')
+                st.markdown(f"**Primary 매칭**: {std_article_id} ({std_article_title}) - 유사도: {similarity:.1%}")
+
+                # 매칭된 모든 조 표시 (matched_articles 사용)
+                matched_articles = analysis.get('matched_articles', [])
+                if matched_articles and len(matched_articles) > 1:
+                    st.markdown(f"**다중 매칭 항목** ({len(matched_articles)}개 조):")
+                    for i, article in enumerate(matched_articles, 1):
+                        article_id = article.get('parent_id', '')
+                        article_title = article.get('title', '')
+                        article_score = article.get('score', 0.0)
+                        num_sub_items = article.get('num_sub_items', 0)
+                        matched_sub_items = article.get('matched_sub_items', [])
+                        sub_items_str = ', '.join(map(str, matched_sub_items))
+
+                        # Primary는 다르게 표시
+                        if i == 1:
+                            st.markdown(f"  **{i}. {article_id}** ({article_title}): {article_score:.1%} (하위항목 {num_sub_items}개: {sub_items_str})")
+                        else:
+                            st.markdown(f"  {i}. {article_id} ({article_title}): {article_score:.1%} (하위항목 {num_sub_items}개: {sub_items_str})")
+            else:
+                st.markdown(f"**매칭 결과**: 매칭 실패 (검색 결과 없음)")
+
+            # 하위항목별 상세 결과
+            sub_item_results = analysis.get('sub_item_results', [])
+            if sub_item_results:
+                # 하위항목별 상세 결과 (커스텀 토글)
+                show_details_key = f"show_details_{user_article_no}"
+                if show_details_key not in st.session_state:
+                    st.session_state[show_details_key] = False
+
+                # 현재 상태 읽기
+                is_expanded = st.session_state[show_details_key]
+
+                # 토글 버튼 (현재 상태 기준으로 레이블 표시)
+                button_label = f"{'▼' if is_expanded else '▶'} 하위항목별 상세 ({len(sub_item_results)}개)"
+
+                # 버튼 클릭 시 상태 토글 후 즉시 리렌더링
+                if st.button(button_label, key=f"toggle_{user_article_no}", use_container_width=False):
+                    st.session_state[show_details_key] = not is_expanded
+                    st.rerun()
+
+                if is_expanded:
                     for sub_result in sub_item_results:
-                        article_id = sub_result.get('matched_article_id', '')
-                        if article_id:
-                            if article_id not in matched_articles:
-                                matched_articles[article_id] = {
-                                    'title': sub_result.get('matched_article_title', ''),
-                                    'sub_items': [],
-                                    'scores': []
-                                }
-                            matched_articles[article_id]['sub_items'].append(sub_result.get('sub_item_index', 0))
-                            matched_articles[article_id]['scores'].append(sub_result.get('score', 0.0))
-                    
-                    # 여러 조가 매칭된 경우 표시
-                    if len(matched_articles) > 1:
-                        st.markdown(f"**⚠️ 다중 조 매칭** ({len(matched_articles)}개 조):")
-                        for article_id, info in matched_articles.items():
-                            avg_score = sum(info['scores']) / len(info['scores']) if info['scores'] else 0.0
-                            sub_items_str = ', '.join(map(str, info['sub_items']))
-                            st.markdown(f"  - {article_id} ({info['title']}): {avg_score:.1%} (하위항목 {sub_items_str})")
-                    
-                    # 하위항목별 상세 결과 (expander 중첩 불가로 토글 버튼 사용)
-                    show_details_key = f"show_details_{user_article_no}"
-                    if show_details_key not in st.session_state:
-                        st.session_state[show_details_key] = False
-                    
-                    if st.button(
-                        f"{'▼' if st.session_state[show_details_key] else '▶'} 하위항목별 상세 ({len(sub_item_results)}개)",
-                        key=f"toggle_{user_article_no}"
-                    ):
-                        st.session_state[show_details_key] = not st.session_state[show_details_key]
-                    
-                    if st.session_state[show_details_key]:
-                        for sub_result in sub_item_results:
-                            sub_idx = sub_result.get('sub_item_index', 0)
-                            sub_text = sub_result.get('sub_item_text', '')[:50]
-                            matched_article = sub_result.get('matched_article_id', '')
-                            matched_title = sub_result.get('matched_article_title', '')
-                            sub_score = sub_result.get('score', 0.0)
-                            
-                            st.markdown(f"  {sub_idx}. `{sub_text}...`")
-                            st.markdown(f"     → {matched_article} ({matched_title}) - {sub_score:.1%}")
-                
-                # 분석 이유
-                reasoning = analysis.get('reasoning', '')
-                if reasoning:
-                    st.markdown(f"**분석**: {reasoning}")
-                
-                # 개선 제안
-                suggestions = analysis.get('suggestions', [])
-                if suggestions:
-                    st.markdown("**개선 제안**:")
-                    for suggestion in suggestions:
+                        sub_idx = sub_result.get('sub_item_index', 0)
+                        sub_text = sub_result.get('sub_item_text', '')[:50]
+                        matched_article = sub_result.get('matched_article_id', '')
+                        matched_title = sub_result.get('matched_article_title', '')
+                        sub_score = sub_result.get('score', 0.0)
+
+                        st.markdown(f"  {sub_idx}. `{sub_text}...`")
+                        st.markdown(f"     → {matched_article} ({matched_title}) - {sub_score:.1%}")
+
+            # 분석 이유
+            reasoning = analysis.get('reasoning', '')
+            if reasoning:
+                st.markdown(f"{reasoning}")
+
+            # 내용 분석 (개선 제안 또는 긍정적 평가)
+            suggestions = analysis.get('suggestions', [])
+            if suggestions:
+                for idx, suggestion in enumerate(suggestions, 1):
+                    # suggestion이 dict인 경우 analysis 필드만 렌더링
+                    if isinstance(suggestion, dict):
+                        analysis_text = suggestion.get('analysis', '')
+                        severity = suggestion.get('severity', 'low')
+                        selected_articles = suggestion.get('selected_standard_articles', [])
+
+                        # 심각도 아이콘 및 레이블
+                        severity_config = {
+                            'high': {'icon': '🔴', 'label': '개선 필요'},
+                            'medium': {'icon': '🟡', 'label': '개선 권장'},
+                            'low': {'icon': '🟢', 'label': '경미한 개선'},
+                            'info': {'icon': '✅', 'label': '충실히 작성됨'}
+                        }
+                        config = severity_config.get(severity, {'icon': '⚪', 'label': '분석'})
+                        severity_icon = config['icon']
+                        severity_label = config['label']
+
+                        # 헤더 표시
+                        if selected_articles:
+                            articles_str = ', '.join(selected_articles)
+                            st.markdown(f"**{severity_icon} {severity_label}** (참조: {articles_str})")
+                        else:
+                            st.markdown(f"**{severity_icon} {severity_label}**")
+
+                        # analysis 텍스트 렌더링 (개행 적용)
+                        if analysis_text:
+                            # 개행을 markdown 개행으로 변환하여 표시
+                            formatted_text = analysis_text.replace('\n', '  \n')
+                            st.markdown(formatted_text)
+
+                        st.markdown("")  # 여백
+                    else:
+                        # 하위 호환성: 문자열인 경우 그대로 출력
                         st.markdown(f"  - {suggestion}")
-                
-                st.markdown("---")
-    
-    # 처리 시간
-    processing_time = content_analysis.get('processing_time', 0.0)
-    st.markdown(f"<p style='text-align:right; color:#6b7280; font-size:0.85rem;'>처리 시간: {processing_time:.2f}초</p>", unsafe_allow_html=True)
+
+            st.markdown("---")
+
+        # 처리 시간 (for loop 외부에 표시)
+        processing_time = content_analysis.get('processing_time', 0.0)
+        st.markdown(f"<p style='text-align:right; color:#6b7280; font-size:0.85rem;'>처리 시간: {processing_time:.2f}초</p>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
