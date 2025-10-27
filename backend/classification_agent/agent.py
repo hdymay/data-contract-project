@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Tuple
 from openai import AzureOpenAI
 from backend.shared.core.celery_app import celery_app
-from backend.shared.database import SessionLocal, ContractDocument, ClassificationResult
+from backend.shared.database import SessionLocal, ContractDocument, ClassificationResult, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +96,15 @@ class ClassificationAgent:
             # 2. 5종 표준계약서와 유사도 계산
             similarity_scores = self._calculate_similarity_scores(
                 key_articles,
-                knowledge_base_loader
+                knowledge_base_loader,
+                contract_id
             )
 
             # 3. LLM으로 최종 분류
             predicted_type, confidence, reasoning = self._llm_classify(
                 key_articles,
-                similarity_scores
+                similarity_scores,
+                contract_id
             )
 
             result = {
@@ -152,7 +154,8 @@ class ClassificationAgent:
     def _calculate_similarity_scores(
         self,
         key_articles: List[Dict[str, str]],
-        knowledge_base_loader
+        knowledge_base_loader,
+        contract_id: str = None
     ) -> Dict[str, float]:
         """
         5종 표준계약서와 유사도 계산
@@ -168,7 +171,7 @@ class ClassificationAgent:
 
         # 주요 조항 전체를 하나의 쿼리로 결합
         query_text = " ".join([art["full_text"] for art in key_articles])
-        query_embedding = self._get_embedding(query_text)
+        query_embedding = self._get_embedding(query_text, contract_id)
 
         # 각 유형별로 유사도 계산
         for contract_type in self.CONTRACT_TYPES.keys():
@@ -203,7 +206,8 @@ class ClassificationAgent:
     def _llm_classify(
         self,
         key_articles: List[Dict[str, str]],
-        similarity_scores: Dict[str, float]
+        similarity_scores: Dict[str, float],
+        contract_id: str = None
     ) -> Tuple[str, float, str]:
         """
         LLM으로 최종 분류
@@ -259,6 +263,18 @@ class ClassificationAgent:
                 max_tokens=500
             )
 
+            # 토큰 사용량 로깅
+            if hasattr(response, 'usage') and response.usage:
+                self._log_token_usage(
+                    contract_id=contract_id,
+                    api_type="chat_completion",
+                    model=self.chat_model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    extra_info={"purpose": "contract_classification"}
+                )
+
             answer = response.choices[0].message.content.strip()
 
             # 응답 파싱
@@ -299,17 +315,61 @@ class ClassificationAgent:
             reasoning = f"LLM 호출 실패. 유사도 기반 분류."
             return predicted_type, confidence, reasoning
 
-    def _get_embedding(self, text: str) -> List[float]:
+    def _get_embedding(self, text: str, contract_id: str = None) -> List[float]:
         """텍스트 임베딩 생성"""
         try:
             response = self.client.embeddings.create(
                 model=self.embedding_model,
                 input=text
             )
+
+            # 토큰 사용량 로깅
+            if hasattr(response, 'usage') and response.usage and contract_id:
+                self._log_token_usage(
+                    contract_id=contract_id,
+                    api_type="embedding",
+                    model=self.embedding_model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=0,
+                    total_tokens=response.usage.total_tokens,
+                    extra_info={"purpose": "similarity_calculation"}
+                )
+
             return response.data[0].embedding
         except Exception as e:
             logger.error(f"임베딩 생성 실패: {e}")
             raise
+
+    def _log_token_usage(
+        self,
+        contract_id: str,
+        api_type: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        extra_info: dict = None
+    ):
+        """토큰 사용량을 DB에 저장"""
+        try:
+            db = SessionLocal()
+            token_usage = TokenUsage(
+                contract_id=contract_id,
+                component="classification_agent",
+                api_type=api_type,
+                model=model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                extra_info=extra_info
+            )
+            db.add(token_usage)
+            db.commit()
+            logger.info(f"토큰 사용량 로깅: {api_type} - {total_tokens} tokens")
+        except Exception as e:
+            logger.error(f"토큰 사용량 로깅 실패: {e}")
+        finally:
+            db.close()
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         """코사인 유사도 계산"""
