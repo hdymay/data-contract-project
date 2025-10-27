@@ -10,7 +10,7 @@ import json
 logger = logging.getLogger("uvicorn.error")
 
 from backend.fastapi.user_contract_parser import UserContractParser
-from backend.shared.database import init_db, get_db, ContractDocument, ClassificationResult, ValidationResult
+from backend.shared.database import init_db, get_db, ContractDocument, ClassificationResult, ValidationResult, TokenUsage
 from backend.classification_agent.agent import classify_contract_task
 from backend.consistency_agent.agent import validate_contract_task
 
@@ -427,6 +427,106 @@ async def get_validation_result(contract_id: str, db: Session = Depends(get_db))
         
     except Exception as e:
         logger.error(f"검증 결과 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/token-usage/{contract_id}")
+async def get_token_usage(contract_id: str, db: Session = Depends(get_db)):
+    """
+    계약서별 토큰 사용량 조회
+
+    Args:
+        contract_id: 계약서 ID
+        db: 데이터베이스 세션
+
+    Returns:
+        {
+            "contract_id": str,
+            "total_tokens": int,
+            "by_component": {
+                "classification_agent": {...},
+                "consistency_agent": {...}
+            },
+            "by_api_type": {
+                "chat_completion": {...},
+                "embedding": {...}
+            },
+            "details": [...]
+        }
+    """
+    try:
+        # 토큰 사용량 조회
+        usages = db.query(TokenUsage).filter(
+            TokenUsage.contract_id == contract_id
+        ).all()
+
+        if not usages:
+            return {
+                "contract_id": contract_id,
+                "total_tokens": 0,
+                "by_component": {},
+                "by_api_type": {},
+                "details": []
+            }
+
+        # 집계
+        total_tokens = sum(u.total_tokens for u in usages)
+
+        by_component = {}
+        by_api_type = {}
+
+        for usage in usages:
+            # Component별 집계
+            if usage.component not in by_component:
+                by_component[usage.component] = {
+                    "total_tokens": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "count": 0
+                }
+            by_component[usage.component]["total_tokens"] += usage.total_tokens
+            by_component[usage.component]["prompt_tokens"] += usage.prompt_tokens
+            by_component[usage.component]["completion_tokens"] += usage.completion_tokens
+            by_component[usage.component]["count"] += 1
+
+            # API Type별 집계
+            if usage.api_type not in by_api_type:
+                by_api_type[usage.api_type] = {
+                    "total_tokens": 0,
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "count": 0
+                }
+            by_api_type[usage.api_type]["total_tokens"] += usage.total_tokens
+            by_api_type[usage.api_type]["prompt_tokens"] += usage.prompt_tokens
+            by_api_type[usage.api_type]["completion_tokens"] += usage.completion_tokens
+            by_api_type[usage.api_type]["count"] += 1
+
+        # 상세 내역
+        details = []
+        for usage in usages:
+            details.append({
+                "id": usage.id,
+                "component": usage.component,
+                "api_type": usage.api_type,
+                "model": usage.model,
+                "prompt_tokens": usage.prompt_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "total_tokens": usage.total_tokens,
+                "created_at": usage.created_at.isoformat() if usage.created_at else None,
+                "extra_info": usage.extra_info
+            })
+
+        return {
+            "contract_id": contract_id,
+            "total_tokens": total_tokens,
+            "by_component": by_component,
+            "by_api_type": by_api_type,
+            "details": details
+        }
+
+    except Exception as e:
+        logger.error(f"토큰 사용량 조회 실패: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
