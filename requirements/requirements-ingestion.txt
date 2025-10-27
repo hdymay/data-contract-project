@@ -13,3 +13,6 @@ openai>=1.30.0
 tiktoken==0.5.2
 numpy==1.24.3
 httpx>=0.24.0
+
+# 한국어 형태소 분석
+konlpy==0.6.0
