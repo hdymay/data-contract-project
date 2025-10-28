@@ -180,9 +180,11 @@ class ContentAnalysisNode:
                     analysis.reasoning = f"표준계약서 {analysis.std_article_id}와 매칭됨 (유사도: {analysis.similarity:.3f})"
 
                 # ContentComparator로 내용 비교
-                # 모든 매칭된 조의 청크 로드
+                # 상위 4개 매칭 조의 청크 로드
+                top_matched_articles = analysis.matched_articles[:4]
                 standard_chunks_list = []
-                for matched_article in analysis.matched_articles:
+
+                for matched_article in top_matched_articles:
                     parent_id = matched_article['parent_id']
 
                     # 해당 조의 모든 청크 로드
@@ -196,12 +198,15 @@ class ContentAnalysisNode:
                     else:
                         logger.warning(f"      표준계약서 조 청크 로드 실패: {parent_id}")
 
+                if len(analysis.matched_articles) > 4:
+                    logger.info(f"      매칭 조 {len(analysis.matched_articles)}개 중 상위 4개만 LLM 비교 수행")
+
                 if not standard_chunks_list:
                     logger.warning(f"      모든 표준계약서 조 청크 로드 실패")
                 else:
                     # LLM 비교 수행
                     # 1개: 직접 비교
-                    # 2개 이상: LLM이 관련 조항 선택 후 비교
+                    # 2개 이상: LLM이 관련 조항 선택 후 비교 (최대 4개)
                     comparison_result = self.content_comparator.compare_articles(
                         user_article,
                         standard_chunks_list,
