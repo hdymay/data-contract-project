@@ -15,3 +15,5 @@ httpx>=0.24.0
 
 # 한국어 형태소 분석
 konlpy==0.6.0
+mecab-ko-msvc
+mecab-ko-dic-msvc
