@@ -22,6 +22,7 @@ Commands:
   - search    : 하이브리드 검색 (FAISS + Whoosh BM25)
   - s_search  : 간이 검색 (FAISS only)
   - status    : 디렉토리 상태 확인
+  - delete    : 청크 또는 인덱스 파일 삭제
   - help      : 도움말
   - exit      : 종료
 
@@ -863,11 +864,11 @@ Commands:
                 logger.info(f"    - {f.name}")
         
         # chunked_documents
-        jsonl_files = list(self.chunked_path.glob("*.jsonl")) if self.chunked_path.exists() else []
+        chunk_files = list(self.chunked_path.glob("*_chunks.json")) if self.chunked_path.exists() else []
         logger.info(f"\n [청킹 결과] ({self.chunked_path}):")
-        logger.info(f"  총 {len(jsonl_files)}개 파일")
+        logger.info(f"  총 {len(chunk_files)}개 파일")
         if '--detail' in arg:
-            for f in jsonl_files:
+            for f in chunk_files:
                 logger.info(f"    - {f.name}")
         
         # search_indexes
@@ -887,20 +888,28 @@ Commands:
         """
         whoosh_dir = self.index_path / "whoosh"
         
-        # Whoosh 인덱스 필수 파일 체크
-        # _MAIN_*.toc 파일이 있으면 인덱스가 생성된 것
-        toc_files = list(whoosh_dir.glob("_MAIN_*.toc"))
+        if not whoosh_dir.exists():
+            return {"icon": "X", "message": "인덱스 디렉토리 없음", "exists": False}
         
-        if not toc_files:
+        # 각 계약 유형별 인덱스 디렉토리 확인
+        contract_types = ['provide', 'create', 'process', 'brokerage_provider', 'brokerage_user']
+        index_dirs = []
+        
+        for contract_type in contract_types:
+            index_dir = whoosh_dir / f"{contract_type}_std_contract"
+            if index_dir.exists():
+                # _MAIN_*.toc 파일이 있으면 인덱스가 생성된 것
+                toc_files = list(index_dir.glob("_MAIN_*.toc"))
+                if toc_files:
+                    index_dirs.append(contract_type)
+        
+        if not index_dirs:
             return {"icon": "X", "message": "인덱스 없음", "exists": False}
         
-        # 세그먼트 파일도 확인
-        seg_files = list(whoosh_dir.glob("*.seg"))
-        
-        if toc_files and seg_files:
-            return {"icon": "O", "message": f"준비됨 ({len(toc_files)}개 TOC, {len(seg_files)}개 세그먼트)", "exists": True}
+        if len(index_dirs) == len(contract_types):
+            return {"icon": "O", "message": f"준비됨 (5종 모두)", "exists": True}
         else:
-            return {"icon": "!", "message": "인덱스 불완전 (세그먼트 파일 없음)", "exists": False}
+            return {"icon": "!", "message": f"부분 준비됨 ({len(index_dirs)}/5종: {', '.join(index_dirs)})", "exists": True}
     
     def _check_faiss_index(self) -> dict:
         """
@@ -911,23 +920,28 @@ Commands:
         """
         faiss_dir = self.index_path / "faiss"
         
-        # FAISS 인덱스 필수 파일 체크
-        # 일반적으로 .index 또는 .faiss 확장자 파일
-        index_files = list(faiss_dir.glob("*.index")) + list(faiss_dir.glob("*.faiss"))
+        if not faiss_dir.exists():
+            return {"icon": "X", "message": "인덱스 디렉토리 없음", "exists": False}
+        
+        # 각 계약 유형별 FAISS 인덱스 파일 확인
+        contract_types = ['provide', 'create', 'process', 'brokerage_provider', 'brokerage_user']
+        index_files = []
+        
+        for contract_type in contract_types:
+            index_file = faiss_dir / f"{contract_type}_std_contract.faiss"
+            if index_file.exists():
+                index_files.append((contract_type, index_file))
         
         if not index_files:
             return {"icon": "X", "message": "인덱스 없음", "exists": False}
         
-        # 메타데이터 파일도 확인 (선택적)
-        metadata_files = list(faiss_dir.glob("*.json")) + list(faiss_dir.glob("*.pkl"))
+        total_size = sum(f.stat().st_size for _, f in index_files) / (1024 * 1024)  # MB
         
-        total_size = sum(f.stat().st_size for f in index_files) / (1024 * 1024)  # MB
-        
-        msg = f"준비됨 ({len(index_files)}개 파일, {total_size:.1f}MB"
-        if metadata_files:
-            msg += f", 메타데이터 {len(metadata_files)}개"
-        msg += ")"
-        return {"icon": "O", "message": msg, "exists": True}
+        if len(index_files) == len(contract_types):
+            return {"icon": "O", "message": f"준비됨 (5종 모두, {total_size:.1f}MB)", "exists": True}
+        else:
+            types_str = ', '.join([t for t, _ in index_files])
+            return {"icon": "!", "message": f"부분 준비됨 ({len(index_files)}/5종: {types_str}, {total_size:.1f}MB)", "exists": True}
     
     def do_ls(self, arg):
         """
@@ -970,6 +984,177 @@ Commands:
                 logger.info(f"  {f.name} ({size_kb:.1f} KB)")
             elif f.is_dir():
                 logger.info(f"   {f.name}/")
+    
+    def do_delete(self, arg):
+        """
+        청크 또는 인덱스 파일 삭제
+        
+        사용법:
+          delete --type chunks
+          delete -t chunks
+          delete --type indexes
+          delete -t indexes
+          
+        타입:
+          - chunks   : 청킹 결과 파일 삭제 (*_chunks.json)
+          - indexes  : 인덱스 파일 삭제 (FAISS + Whoosh)
+        """
+        try:
+            # 인자 파싱
+            args = self._parse_delete_args(arg)
+            if not args:
+                return
+            
+            delete_type = args.get('type')
+            
+            logger.info("=" * 60)
+            logger.info(f" 삭제 작업 시작: {delete_type}")
+            logger.info("=" * 60)
+            
+            if delete_type == 'chunks':
+                self._delete_chunks()
+            elif delete_type == 'indexes':
+                self._delete_indexes()
+            else:
+                logger.error(f" 알 수 없는 타입: {delete_type}")
+                return
+            
+            logger.info("=" * 60)
+            logger.info(" 삭제 완료")
+            logger.info("=" * 60)
+            
+        except Exception as e:
+            logger.error(f" 오류 발생: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _parse_delete_args(self, arg):
+        """delete 명령어 인자 파싱"""
+        args = {}
+        tokens = arg.split()
+        
+        i = 0
+        while i < len(tokens):
+            if tokens[i] in ['--type', '-t'] and i + 1 < len(tokens):
+                delete_type = tokens[i + 1]
+                if delete_type not in ['chunks', 'indexes']:
+                    logger.error(f" 잘못된 타입: {delete_type}")
+                    logger.error("   사용 가능: chunks, indexes")
+                    return None
+                args['type'] = delete_type
+                i += 2
+            else:
+                i += 1
+        
+        # 필수 인자 체크
+        if 'type' not in args:
+            logger.error(" --type (-t) 인자가 필요합니다")
+            return None
+        
+        return args
+    
+    def _delete_chunks(self):
+        """청크 파일 삭제"""
+        if not self.chunked_path.exists():
+            logger.warning(f"  청크 디렉토리가 존재하지 않습니다: {self.chunked_path}")
+            return
+        
+        # *_chunks.json 파일 찾기
+        chunk_files = list(self.chunked_path.glob("*_chunks.json"))
+        
+        if not chunk_files:
+            logger.info("  삭제할 청크 파일이 없습니다")
+            return
+        
+        logger.info(f"  삭제할 파일: {len(chunk_files)}개")
+        
+        deleted_count = 0
+        for file in chunk_files:
+            try:
+                logger.info(f"    - {file.name}")
+                file.unlink()
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"       [ERROR] 삭제 실패: {e}")
+        
+        logger.info(f"  삭제 완료: {deleted_count}/{len(chunk_files)}개")
+    
+    def _delete_indexes(self):
+        """인덱스 파일 삭제 (FAISS + Whoosh)"""
+        deleted_faiss = self._delete_faiss_indexes()
+        deleted_whoosh = self._delete_whoosh_indexes()
+        
+        logger.info(f"  FAISS 인덱스 삭제: {deleted_faiss}개")
+        logger.info(f"  Whoosh 인덱스 삭제: {deleted_whoosh}개")
+    
+    def _delete_faiss_indexes(self):
+        """FAISS 인덱스 파일 삭제"""
+        faiss_dir = self.index_path / "faiss"
+        
+        if not faiss_dir.exists():
+            logger.warning(f"  FAISS 디렉토리가 존재하지 않습니다: {faiss_dir}")
+            return 0
+        
+        # *.faiss 파일 찾기
+        faiss_files = list(faiss_dir.glob("*.faiss"))
+        
+        if not faiss_files:
+            logger.info("  삭제할 FAISS 인덱스가 없습니다")
+            return 0
+        
+        logger.info(f"  FAISS 인덱스 삭제 중... ({len(faiss_files)}개)")
+        
+        deleted_count = 0
+        for file in faiss_files:
+            try:
+                logger.info(f"    - {file.name}")
+                file.unlink()
+                deleted_count += 1
+            except Exception as e:
+                logger.error(f"       [ERROR] 삭제 실패: {e}")
+        
+        return deleted_count
+    
+    def _delete_whoosh_indexes(self):
+        """Whoosh 인덱스 파일 삭제"""
+        whoosh_dir = self.index_path / "whoosh"
+        
+        if not whoosh_dir.exists():
+            logger.warning(f"  Whoosh 디렉토리가 존재하지 않습니다: {whoosh_dir}")
+            return 0
+        
+        # 계약 유형별 디렉토리 찾기
+        contract_types = ['provide', 'create', 'process', 'brokerage_provider', 'brokerage_user']
+        
+        deleted_count = 0
+        logger.info(f"  Whoosh 인덱스 삭제 중...")
+        
+        for contract_type in contract_types:
+            index_dir = whoosh_dir / f"{contract_type}_std_contract"
+            
+            if not index_dir.exists():
+                continue
+            
+            # 인덱스 파일들 찾기 (*.toc, *.seg, WRITELOCK)
+            toc_files = list(index_dir.glob("*.toc"))
+            seg_files = list(index_dir.glob("*.seg"))
+            lock_files = list(index_dir.glob("*WRITELOCK"))
+            
+            all_files = toc_files + seg_files + lock_files
+            
+            if not all_files:
+                continue
+            
+            logger.info(f"    - {contract_type}: {len(all_files)}개 파일")
+            
+            for file in all_files:
+                try:
+                    file.unlink()
+                    deleted_count += 1
+                except Exception as e:
+                    logger.error(f"       [ERROR] 삭제 실패 ({file.name}): {e}")
+        
+        return deleted_count
     
     def do_exit(self, arg):
         logger.info("ingestion 종료")
