@@ -151,22 +151,31 @@ class HybridSearcher:
     def sparse_search(self, query: str, top_k: int = 50) -> List[Dict[str, Any]]:
         """
         Sparse 검색 (Whoosh BM25)
-        
+
         Args:
             query: 검색 쿼리
             top_k: 반환할 결과 개수
-            
+
         Returns:
             검색 결과 리스트
         """
         if self.whoosh_indexer is None:
             logger.error("Whoosh 인덱스가 로드되지 않았습니다")
             return []
-        
+
         try:
             # Whoosh BM25 검색
             whoosh_results = self.whoosh_indexer.search(query, top_k=top_k)
-            
+
+            # 진단: 검색 결과 개수 및 점수 범위
+            if not whoosh_results:
+                logger.warning(f"Sparse 검색 결과 없음 (쿼리 길이: {len(query)})")
+                logger.debug(f"  쿼리 미리보기: {query[:200]}...")
+                return []
+
+            scores = [hit['score'] for hit in whoosh_results]
+            logger.debug(f"Sparse 검색 완료: {len(whoosh_results)}개, 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
+
             # 결과 변환
             results = []
             for hit in whoosh_results:
@@ -182,17 +191,19 @@ class HybridSearcher:
                     'order_index': hit['order_index'],
                     'anchors': hit.get('anchors', [])
                 }
-                
+
                 results.append({
                     'chunk': chunk,
                     'score': hit['score'],
                     'source': 'sparse'
                 })
-            
+
             return results
-            
+
         except Exception as e:
             logger.error(f"Sparse 검색 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
     
     def normalize_scores(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -231,21 +242,34 @@ class HybridSearcher:
     ) -> List[Dict[str, Any]]:
         """
         Dense와 Sparse 검색 결과를 융합
-        
+
+        Adaptive Weighting:
+        - Sparse 결과가 없으면 자동으로 Dense 가중치를 1.0으로 조정
+        - 이를 통해 0.85 상한 문제 해결
+
         Args:
             dense_results: Dense 검색 결과
             sparse_results: Sparse 검색 결과
-            
+
         Returns:
             융합된 검색 결과 리스트
         """
+        # Adaptive Weighting: Sparse 결과 부재 시 가중치 조정
+        if not sparse_results and dense_results:
+            logger.warning(f"Sparse 검색 결과 없음 - Adaptive Weighting 적용 (Dense: 1.0)")
+            effective_dense_weight = 1.0
+            effective_sparse_weight = 0.0
+        else:
+            effective_dense_weight = self.dense_weight
+            effective_sparse_weight = self.sparse_weight
+
         # 1. 점수 정규화
         dense_normalized = self.normalize_scores(dense_results)
         sparse_normalized = self.normalize_scores(sparse_results)
-        
+
         # 2. 청크 ID별로 결과 수집
         chunk_scores = {}
-        
+
         # Dense 결과 추가
         for result in dense_normalized:
             chunk_id = result['chunk']['id']
@@ -254,27 +278,34 @@ class HybridSearcher:
                 'dense_score': result['normalized_score'],
                 'sparse_score': 0.0
             }
-        
+
         # Sparse 결과 추가/병합
+        sparse_contribution_count = 0
         for result in sparse_normalized:
             chunk_id = result['chunk']['id']
             if chunk_id in chunk_scores:
                 chunk_scores[chunk_id]['sparse_score'] = result['normalized_score']
+                sparse_contribution_count += 1
             else:
                 chunk_scores[chunk_id] = {
                     'chunk': result['chunk'],
                     'dense_score': 0.0,
                     'sparse_score': result['normalized_score']
                 }
-        
-        # 3. 가중합 계산
+
+        # 진단: Sparse 기여도
+        if sparse_results:
+            overlap_rate = sparse_contribution_count / len(chunk_scores) * 100
+            logger.debug(f"Sparse-Dense 중복: {sparse_contribution_count}/{len(chunk_scores)} ({overlap_rate:.1f}%)")
+
+        # 3. 가중합 계산 (Adaptive Weighting 적용)
         fused_results = []
         for chunk_id, data in chunk_scores.items():
             final_score = (
-                self.dense_weight * data['dense_score'] +
-                self.sparse_weight * data['sparse_score']
+                effective_dense_weight * data['dense_score'] +
+                effective_sparse_weight * data['sparse_score']
             )
-            
+
             fused_results.append({
                 'chunk': data['chunk'],
                 'score': final_score,
@@ -283,10 +314,10 @@ class HybridSearcher:
                 'parent_id': data['chunk'].get('parent_id'),
                 'title': data['chunk'].get('title')
             })
-        
+
         # 4. 최종 점수로 정렬
         fused_results.sort(key=lambda x: x['score'], reverse=True)
-        
+
         return fused_results
     
     def search(

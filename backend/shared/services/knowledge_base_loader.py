@@ -123,31 +123,44 @@ class KnowledgeBaseLoader:
     def load_whoosh_index(self, contract_type: str):
         """
         Whoosh 인덱스 로드
-        
+
         Args:
             contract_type: 계약 유형
-            
+
         Returns:
-            WhooshIndexer 인스턴스 또는 None
+            WhooshSearcher 인스턴스 또는 None
         """
         whoosh_path = self.whoosh_dir / f"{contract_type}_std_contract"
-        
+
+        logger.info(f"Whoosh 인덱스 로드 시도: {whoosh_path}")
+
         if not whoosh_path.exists():
             logger.error(f"Whoosh 인덱스 디렉토리를 찾을 수 없습니다: {whoosh_path}")
             return None
-        
+
+        # 인덱스 파일들 확인
+        index_files = list(whoosh_path.glob("*"))
+        logger.info(f"  인덱스 디렉토리 내 파일: {len(index_files)}개")
+        for f in index_files[:5]:  # 최대 5개만 출력
+            logger.debug(f"    - {f.name}")
+
         try:
-            # WhooshIndexer 임포트 및 초기화
-            import sys
-            sys.path.append('/app')
-            from ingestion.indexers.whoosh_indexer import WhooshIndexer
-            
-            indexer = WhooshIndexer(whoosh_path)
-            logger.info(f"Whoosh 인덱스 로드 완료: {contract_type}")
-            return indexer
-            
+            # WhooshSearcher 임포트 및 초기화
+            from backend.shared.services.whoosh_searcher import WhooshSearcher
+
+            searcher = WhooshSearcher(whoosh_path)
+
+            # 인덱스 상태 확인 (문서 개수)
+            with searcher.ix.searcher() as s:
+                doc_count = s.doc_count_all()
+                logger.info(f"Whoosh 인덱스 로드 완료: {contract_type} ({doc_count} 문서)")
+
+            return searcher
+
         except Exception as e:
             logger.error(f"Whoosh 인덱스 로드 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return None
     
     def get_available_contract_types(self) -> list:
