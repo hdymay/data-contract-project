@@ -72,11 +72,11 @@ class UserContractChunker:
                             order_index
                         )
                         if result:
-                            # 세그먼트 리스트인 경우
+                            # 리스트인 경우 (여러 항으로 분할된 경우)
                             if isinstance(result, list):
-                                for seg_chunk in result:
-                                    seg_chunk['order_index'] = order_index
-                                    chunks.append(seg_chunk)
+                                for chunk in result:
+                                    chunk['order_index'] = order_index
+                                    chunks.append(chunk)
                                     order_index += 1
                                 order_index -= 1
                             else:
@@ -124,61 +124,125 @@ class UserContractChunker:
         title: str,
         source_file: str,
         order_index: int
-    ) -> Dict[str, Any]:
-        """조 본문 처리 - 항 번호 파싱하여 개별 ID 부여"""
+    ):
+        """조 본문 처리 - 항 번호 파싱하여 개별 chunk로 분할"""
         import re
         
         item_text = item.get('text', '')
         
-        # 항 번호 추출 (①, ②, ③ 또는 1., 2., 3. 형식)
-        clause_match = re.match(r'^[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]', item_text.strip())
-        if not clause_match:
-            # 숫자 형식 시도
-            clause_match = re.match(r'^(\d+)\.', item_text.strip())
+        # 항 번호 매핑
+        clause_num_map = {
+            '①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5,
+            '⑥': 6, '⑦': 7, '⑧': 8, '⑨': 9, '⑩': 10,
+            '⑪': 11, '⑫': 12, '⑬': 13, '⑭': 14, '⑮': 15,
+            '⑯': 16, '⑰': 17, '⑱': 18, '⑲': 19, '⑳': 20
+        }
         
-        if clause_match:
-            # 항 번호가 있는 경우
-            clause_symbol = clause_match.group(0)
-            # 원형 숫자를 일반 숫자로 변환
-            clause_num_map = {
-                '①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5,
-                '⑥': 6, '⑦': 7, '⑧': 8, '⑨': 9, '⑩': 10,
-                '⑪': 11, '⑫': 12, '⑬': 13, '⑭': 14, '⑮': 15,
-                '⑯': 16, '⑰': 17, '⑱': 18, '⑲': 19, '⑳': 20
-            }
-            
-            if clause_symbol in clause_num_map:
-                clause_num = clause_num_map[clause_symbol]
+        # 항 번호로 텍스트 분할 (①, ②, ③ 등)
+        # 패턴: 원형 숫자로 시작하는 부분을 찾음
+        clause_pattern = r'([①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳])'
+        parts = re.split(clause_pattern, item_text)
+        
+        # 분할된 부분을 재조합하여 각 항 추출
+        clauses = []
+        current_clause_num = None
+        current_clause_text = ""
+        
+        for part in parts:
+            if part in clause_num_map:
+                # 이전 항 저장
+                if current_clause_num is not None:
+                    clauses.append((current_clause_num, current_clause_text.strip()))
+                # 새 항 시작
+                current_clause_num = clause_num_map[part]
+                current_clause_text = part
             else:
-                # 숫자 형식인 경우
-                clause_num = int(clause_match.group(1))
-            
-            chunk_id = f"제{article_no}조 제{clause_num}항"
-            global_id = f"urn:user:{self.contract_type}:art:{article_no:03d}:clause:{clause_num:03d}"
-            unit_type = "clause"
-        else:
-            # 항 번호가 없는 경우 (조 본문)
+                current_clause_text += part
+        
+        # 마지막 항 저장
+        if current_clause_num is not None:
+            clauses.append((current_clause_num, current_clause_text.strip()))
+        
+        # 항이 없는 경우 (조 본문만 있는 경우)
+        if not clauses:
             chunk_id = f"제{article_no}조 조본문"
             global_id = f"urn:user:{self.contract_type}:art:{article_no:03d}:att"
             unit_type = "articleText"
+            
+            text_raw = item_text
+            text_norm = self._normalize_text(item_text, '조 본문')
+            
+            chunk = {
+                "id": chunk_id,
+                "global_id": global_id,
+                "unit_type": unit_type,
+                "parent_id": parent_id,
+                "title": title,
+                "order_index": order_index,
+                "text_raw": text_raw,
+                "text_norm": text_norm,
+                "anchors": [],
+                "source_file": source_file
+            }
+            
+            return chunk
         
-        text_raw = item_text
-        text_norm = self._normalize_text(item_text, '조 본문')
+        # 여러 항이 있는 경우 - 각 항을 별도 chunk로 반환
+        chunks = []
+        for clause_num, clause_text in clauses:
+            text_raw = clause_text
+            text_norm = self._normalize_text(clause_text, '조 본문')
+            
+            # text_norm에 // 구분자가 있으면 세그먼트별로 청크 분할
+            if '//' in text_norm:
+                segments = [seg.strip() for seg in text_norm.split('//') if seg.strip()]
+                
+                # 각 세그먼트를 별도 청크로 생성
+                for seg_idx, segment in enumerate(segments):
+                    if seg_idx == 0:
+                        # 첫 번째 세그먼트는 항 본문
+                        chunk_id = f"제{article_no}조 제{clause_num}항"
+                        global_id = f"urn:user:{self.contract_type}:art:{article_no:03d}:clause:{clause_num:03d}"
+                    else:
+                        # 나머지는 호 단위
+                        chunk_id = f"제{article_no}조 제{clause_num}항 제{seg_idx}호"
+                        global_id = f"urn:user:{self.contract_type}:art:{article_no:03d}:clause:{clause_num:03d}:sub:{seg_idx:03d}"
+                    
+                    chunk = {
+                        "id": chunk_id,
+                        "global_id": global_id,
+                        "unit_type": "clause" if seg_idx == 0 else "subClause",
+                        "parent_id": parent_id,
+                        "title": title,
+                        "order_index": order_index,
+                        "text_raw": segment,  # 세그먼트 원문
+                        "text_norm": segment,  # 세그먼트 정규화 (이미 정규화됨)
+                        "anchors": [],
+                        "source_file": source_file
+                    }
+                    chunks.append(chunk)
+            else:
+                # 세그먼트가 없으면 기존 방식
+                chunk_id = f"제{article_no}조 제{clause_num}항"
+                global_id = f"urn:user:{self.contract_type}:art:{article_no:03d}:clause:{clause_num:03d}"
+                unit_type = "clause"
+                
+                chunk = {
+                    "id": chunk_id,
+                    "global_id": global_id,
+                    "unit_type": unit_type,
+                    "parent_id": parent_id,
+                    "title": title,
+                    "order_index": order_index,
+                    "text_raw": text_raw,
+                    "text_norm": text_norm,
+                    "anchors": [],
+                    "source_file": source_file
+                }
+                
+                chunks.append(chunk)
         
-        chunk = {
-            "id": chunk_id,
-            "global_id": global_id,
-            "unit_type": unit_type,
-            "parent_id": parent_id,
-            "title": title,
-            "order_index": order_index,
-            "text_raw": text_raw,
-            "text_norm": text_norm,
-            "anchors": [],
-            "source_file": source_file
-        }
-        
-        return chunk
+        return chunks
     
     def _process_subclause(
         self,
@@ -234,28 +298,54 @@ class UserContractChunker:
         if item_type == '호':
             normalized = re.sub(r'^\s*\d+\.\s*', '', normalized)
         
-        # 하위 항목 분할 ((가), (나), (다) 등)
-        # 예: "(가) 접근 통제: ... (나) 데이터 암호화: ..." → ["(가) 접근 통제: ...", "(나) 데이터 암호화: ..."]
-        sub_items = re.split(r'(\([가-힣]\))', normalized)
+        # 하위 항목 분할
+        # 1) 숫자 호: "1.", "2.", "3." 등
+        # 2) 한글 호: "(가)", "(나)", "(다)" 등
+        # 예: "1. 지급 불이행: ... 2. 무단 이용: ..." → ["1. 지급 불이행: ...", "2. 무단 이용: ..."]
         
-        # 분할된 항목을 재조합 (구분자 포함)
-        segments = []
-        current_segment = ""
-        for i, part in enumerate(sub_items):
-            if re.match(r'\([가-힣]\)', part):  # 구분자 발견
-                if current_segment:  # 이전 세그먼트 저장
-                    segments.append(current_segment.strip())
-                current_segment = part  # 새 세그먼트 시작
-            else:
-                current_segment += part
+        # 먼저 숫자 호로 분할 시도
+        number_pattern = r'(\d+\.)'
+        number_parts = re.split(number_pattern, normalized)
         
-        if current_segment:  # 마지막 세그먼트 저장
-            segments.append(current_segment.strip())
+        # 숫자 호가 있으면 숫자 호로 분할
+        if len(number_parts) > 1:
+            segments = []
+            current_segment = ""
+            for part in number_parts:
+                if re.match(number_pattern, part):  # 숫자 호 발견
+                    if current_segment:  # 이전 세그먼트 저장
+                        segments.append(current_segment.strip())
+                    current_segment = part  # 새 세그먼트 시작
+                else:
+                    current_segment += part
+            
+            if current_segment:  # 마지막 세그먼트 저장
+                segments.append(current_segment.strip())
+        else:
+            # 숫자 호가 없으면 한글 호로 분할 시도
+            hangul_pattern = r'(\([가-힣]\))'
+            hangul_parts = re.split(hangul_pattern, normalized)
+            
+            segments = []
+            current_segment = ""
+            for part in hangul_parts:
+                if re.match(hangul_pattern, part):  # 한글 호 발견
+                    if current_segment:  # 이전 세그먼트 저장
+                        segments.append(current_segment.strip())
+                    current_segment = part  # 새 세그먼트 시작
+                else:
+                    current_segment += part
+            
+            if current_segment:  # 마지막 세그먼트 저장
+                segments.append(current_segment.strip())
         
         # 각 세그먼트 정규화
         normalized_segments = []
         for segment in segments:
             seg = segment
+            
+            # 원형 숫자 제거 (①, ②, ③ 등)
+            seg = re.sub(r'[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]', '', seg)
             
             # 구체적 데이터 유형을 "데이터"로 추상화
             # 패턴을 더 유연하게 수정 (괄호, 별칭 등 포함)
@@ -279,6 +369,9 @@ class UserContractChunker:
             
             # 괄호 안의 별칭 제거 (이하 "XXX")
             seg = re.sub(r'\(이하\s*["\']?[^)]+["\']?\)', '', seg)
+            
+            # 특수 문장부호 제거 (콜론, 세미콜론 등)
+            seg = re.sub(r'[:;]', '', seg)
             
             # 개행을 공백으로 변환
             seg = re.sub(r'\n+', ' ', seg)
