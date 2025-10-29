@@ -60,7 +60,10 @@ class ContentAnalysisNode:
         self,
         contract_id: str,
         user_contract: Dict[str, Any],
-        contract_type: str
+        contract_type: str,
+        text_weight: float = 0.7,
+        title_weight: float = 0.3,
+        dense_weight: float = 0.85
     ) -> ContentAnalysisResult:
         """
         계약서 전체 분석
@@ -69,13 +72,16 @@ class ContentAnalysisNode:
             contract_id: 계약서 ID
             user_contract: 사용자 계약서 파싱 결과
             contract_type: 분류된 계약 유형
+            text_weight: 본문 가중치 (기본값: 0.7)
+            title_weight: 제목 가중치 (기본값: 0.3)
+            dense_weight: 시멘틱 가중치 (기본값: 0.85)
             
         Returns:
             ContentAnalysisResult: 전체 분석 결과
         """
         start_time = time.time()
         
-        logger.info(f"A3 분석 시작: {contract_id} (type={contract_type})")
+        logger.info(f"A3 분석 시작: {contract_id} (type={contract_type}), weights: text={text_weight}, title={title_weight}, dense={dense_weight}")
         
         # 결과 객체 초기화
         result = ContentAnalysisResult(
@@ -96,7 +102,14 @@ class ContentAnalysisNode:
         # 각 조항 분석
         for article in articles:
             try:
-                analysis = self.analyze_article(article, contract_type, contract_id)
+                analysis = self.analyze_article(
+                    article, 
+                    contract_type, 
+                    contract_id,
+                    text_weight=text_weight,
+                    title_weight=title_weight,
+                    dense_weight=dense_weight
+                )
                 result.article_analysis.append(analysis)
                 
                 if analysis.matched:
@@ -119,7 +132,10 @@ class ContentAnalysisNode:
         self,
         user_article: Dict[str, Any],
         contract_type: str,
-        contract_id: str = None
+        contract_id: str = None,
+        text_weight: float = 0.7,
+        title_weight: float = 0.3,
+        dense_weight: float = 0.85
     ) -> ArticleAnalysis:
         """
         단일 조항 분석
@@ -128,6 +144,9 @@ class ContentAnalysisNode:
             user_article: 사용자 계약서 조항
             contract_type: 계약 유형
             contract_id: 계약서 ID (토큰 로깅용)
+            text_weight: 본문 가중치 (기본값: 0.7)
+            title_weight: 제목 가중치 (기본값: 0.3)
+            dense_weight: 시멘틱 가중치 (기본값: 0.85)
 
         Returns:
             ArticleAnalysis: 조항 분석 결과
@@ -147,11 +166,14 @@ class ContentAnalysisNode:
         )
         
         try:
-            # 1. 대응 조항 검색
+            # 1. 대응 조항 검색 (가중치 전달)
             matching_result = self.article_matcher.find_matching_article(
                 user_article,
                 contract_type,
-                contract_id=contract_id
+                contract_id=contract_id,
+                text_weight=text_weight,
+                title_weight=title_weight,
+                dense_weight=dense_weight
             )
 
             # 매칭 정보 업데이트

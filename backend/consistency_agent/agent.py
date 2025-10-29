@@ -11,14 +11,17 @@ logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="consistency.validate_contract", queue="consistency_validation")
-def validate_contract_task(self, contract_id: str):
+def validate_contract_task(self, contract_id: str, text_weight: float = 0.7, title_weight: float = 0.3, dense_weight: float = 0.85):
     """
     계약서 정합성 검증 작업 (A3 노드)
     
     Args:
         contract_id: 검증할 계약서 ID
+        text_weight: 본문 가중치 (기본값: 0.7)
+        title_weight: 제목 가중치 (기본값: 0.3)
+        dense_weight: 시멘틱 가중치 (기본값: 0.85)
     """
-    logger.info(f"A3 노드 정합성 검증 시작: {contract_id}")
+    logger.info(f"A3 노드 정합성 검증 시작: {contract_id}, weights: text={text_weight}, title={title_weight}, dense={dense_weight}")
     
     db = None
     try:
@@ -65,11 +68,14 @@ def validate_contract_task(self, contract_id: str):
             azure_client=azure_client
         )
         
-        # A3 분석 수행
+        # A3 분석 수행 (가중치 전달)
         analysis_result = a3_node.analyze_contract(
             contract_id=contract_id,
             user_contract=contract.parsed_data,
-            contract_type=contract_type
+            contract_type=contract_type,
+            text_weight=text_weight,
+            title_weight=title_weight,
+            dense_weight=dense_weight
         )
         
         # 검증 결과 저장
