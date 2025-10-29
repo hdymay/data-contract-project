@@ -125,7 +125,6 @@ class ContractVerificationEngine:
         # 5. 각 사용자 조문에 대해 매칭 찾기
         matched_titles = set()
         match_results = []
-        duplicate_matches = []
         
         for i, user_clause in enumerate(user_clauses):
             logger.info(f"Verifying user clause {i+1}/{len(user_clauses)}: {user_clause.id}")
@@ -145,56 +144,27 @@ class ContractVerificationEngine:
                     'distance': float(distance)
                 })
             
-            # Top-k 항에 대해 LLM 검증 (항 단위 직접 매칭)
-            best_match = None
-            best_match_result = None
+            # Top-k 항에 대해 LLM 배치 검증 (한 번에 여러 후보 검증)
             candidate_results = []  # 모든 후보의 결과 저장
+            matched_count_for_user = 0
             
-            for candidate_info in candidates[:top_k_titles]:
+            # 배치 검증용 후보 준비
+            batch_candidates = [
+                (candidate_info['clause'], candidate_info['similarity'])
+                for candidate_info in candidates[:top_k_titles]
+            ]
+            
+            # 배치 LLM 검증 (한 번의 API 호출로 모든 후보 검증)
+            llm_decisions = self.llm_verification.verify_clause_match_batch(
+                user_clause=user_clause,
+                standard_candidates=batch_candidates,
+                min_confidence=min_confidence
+            )
+            
+            # 배치 결과 처리
+            for candidate_info, llm_decision in zip(candidates[:top_k_titles], llm_decisions):
                 candidate = candidate_info['clause']
                 candidate_id = candidate.id
-                
-                # 이미 매칭된 표준 항인지 확인
-                if candidate_id in matched_titles:
-                    # 중복 매칭 시도 감지
-                    logger.warning(
-                        f"Duplicate match attempt: {user_clause.id} -> {candidate_id} "
-                        f"(already matched)"
-                    )
-                    
-                    # LLM 검증은 수행하여 중복 매칭 정보 기록
-                    llm_decision = self.llm_verification.verify_clause_match(
-                        standard_clause=candidate,
-                        candidate_clause=user_clause
-                    )
-                    
-                    if llm_decision.is_match and llm_decision.confidence >= min_confidence:
-                        # 중복 매칭 결과 생성
-                        duplicate_result = MatchResult(
-                            standard_clause=candidate,
-                            matched_clause=user_clause,
-                            bm25_score=0.0,
-                            faiss_score=candidate_info['similarity'],
-                            hybrid_score=candidate_info['similarity'],
-                            llm_decision=llm_decision,
-                            is_matched=False,  # 중복이므로 매칭으로 카운트하지 않음
-                            is_duplicate=True,
-                            duplicate_reason=f"표준 항 '{candidate_id}'이(가) 이미 다른 사용자 항과 매칭됨"
-                        )
-                        duplicate_matches.append(duplicate_result)
-                        logger.info(
-                            f"Duplicate match recorded: {user_clause.id} -> {candidate_id} "
-                            f"(confidence: {llm_decision.confidence:.2f})"
-                        )
-                    
-                    # 다음 후보로 계속
-                    continue
-                
-                # LLM 검증
-                llm_decision = self.llm_verification.verify_clause_match(
-                    standard_clause=candidate,
-                    candidate_clause=user_clause
-                )
                 
                 # 매칭 결과 생성
                 match_result = MatchResult(
@@ -210,19 +180,24 @@ class ContractVerificationEngine:
                 # 모든 후보 결과 저장
                 candidate_results.append(match_result)
                 
+                # 매칭 성공 시 처리 (여러 개 가능)
                 if match_result.is_matched:
-                    best_match = candidate_id
-                    best_match_result = match_result
                     matched_titles.add(candidate_id)
+                    matched_count_for_user += 1
                     logger.info(
                         f"Match found: {user_clause.id} -> {candidate.id} "
                         f"(confidence: {llm_decision.confidence:.2f})"
                     )
-                    break
+            
+            # 매칭된 후보가 있으면 첫 번째를 대표로 저장
+            best_match_result = next(
+                (r for r in candidate_results if r.is_matched),
+                None
+            )
             
             # 매칭 성공 시: 매칭된 결과만 저장
             # 매칭 실패 시: Top-3 후보 결과 모두 저장 (LLM 판단 근거 포함)
-            if best_match:
+            if best_match_result:
                 # 매칭 성공 - 매칭된 결과만 저장
                 match_results.append(best_match_result)
             elif candidate_results:
@@ -230,7 +205,7 @@ class ContractVerificationEngine:
                 for result in candidate_results[:3]:
                     match_results.append(result)
             
-            if not best_match:
+            if not best_match_result:
                 logger.warning(f"No match found for user clause: {user_clause.id}")
         
         # 6. 누락된 조문 식별 (표준 계약서 기준 - 항 단위)
@@ -255,7 +230,31 @@ class ContractVerificationEngine:
                     is_matched=False
                 ))
         
-        # 7. 검증 결과 생성
+        # 7. 매칭 안 된 사용자 조문 식별 및 분석
+        logger.info("Identifying unmatched user clauses...")
+        matched_user_ids = set(
+            r.matched_clause.id for r in match_results 
+            if r.is_matched and r.matched_clause
+        )
+        logger.info(f"Total user clauses: {len(user_clauses)}, Matched user IDs: {len(matched_user_ids)}")
+        logger.info(f"Expected unmatched: {len(user_clauses) - len(matched_user_ids)}")
+        
+        unmatched_user_clauses = self._find_unmatched_user_clauses(
+            user_clauses=user_clauses,
+            matched_user_ids=matched_user_ids,
+            standard_clauses=standard_clauses
+        )
+        
+        # 8. 정방향 검증 (누락 조문 재검증)
+        logger.info("Performing forward verification for missing clauses...")
+        missing_clause_analysis = self._verify_missing_clauses_forward(
+            missing_clauses=missing_clauses,
+            user_clauses=user_clauses,
+            faiss_index=faiss_index,
+            standard_clauses=standard_clauses
+        )
+        
+        # 9. 검증 결과 생성
         matched_clause_count = len(matched_standard_ids)  # 매칭된 항의 개수
         
         result = VerificationResult(
@@ -263,7 +262,9 @@ class ContractVerificationEngine:
             matched_clauses=matched_clause_count,  # 매칭된 항 개수
             missing_clauses=missing_clauses,
             match_results=match_results,
-            duplicate_matches=duplicate_matches,
+            duplicate_matches=[],  # 중복 체크 제거
+            unmatched_user_clauses=unmatched_user_clauses,
+            missing_clause_analysis=missing_clause_analysis,
             total_user_clauses=len(user_clauses),
             verification_date=datetime.now()
         )
@@ -272,7 +273,7 @@ class ContractVerificationEngine:
             f"Reverse verification completed: "
             f"{matched_clause_count}/{len(standard_clauses)} clauses matched, "
             f"{len(missing_clauses)} clauses missing, "
-            f"{len(duplicate_matches)} duplicate matches detected"
+            f"{len(unmatched_user_clauses)} unmatched user clauses"
         )
         
         return result
@@ -389,20 +390,34 @@ class ContractVerificationEngine:
             if clause.id not in matched_standard_ids
         ]
         
-        # 5. 검증 결과 생성
+        # 5. 매칭 안 된 사용자 조문 식별 및 분석
+        logger.info("Identifying unmatched user clauses...")
+        matched_user_ids = set(
+            r.matched_clause.id for r in match_results 
+            if r.is_matched and r.matched_clause
+        )
+        unmatched_user_clauses = self._find_unmatched_user_clauses(
+            user_clauses=user_clauses,
+            matched_user_ids=matched_user_ids,
+            standard_clauses=standard_clauses
+        )
+        
+        # 6. 검증 결과 생성
         result = VerificationResult(
             total_standard_clauses=len(standard_clauses),
             total_user_clauses=len(user_clauses),
             matched_clauses=matched_count,
             missing_clauses=missing_clauses,
             match_results=match_results,
+            unmatched_user_clauses=unmatched_user_clauses,
             verification_date=datetime.now()
         )
         
         logger.info(
             f"Verification completed: "
             f"{matched_count}/{len(standard_clauses)} clauses matched, "
-            f"{len(missing_clauses)} missing"
+            f"{len(missing_clauses)} missing from standard, "
+            f"{len(unmatched_user_clauses)} unmatched user clauses"
         )
         
         return result
@@ -437,6 +452,7 @@ class ContractVerificationEngine:
     def _embed_clauses(self, clauses: List[ClauseData]) -> List[ClauseData]:
         """
         조문 리스트에 임베딩 생성 (이미 있으면 스킵)
+        세그먼트 기법: text_norm에 // 구분자가 있으면 분할하여 평균 임베딩 생성
         
         Args:
             clauses: 조문 리스트
@@ -453,14 +469,285 @@ class ContractVerificationEngine:
         
         logger.info(f"Generating embeddings for {len(clauses_without_embedding)} clauses (skipping {len(clauses) - len(clauses_without_embedding)} with existing embeddings)")
         
-        # 세그먼트 기법 적용: text_norm 사용 (// 구분자 포함)
-        texts = [clause.text_norm or clause.text for clause in clauses_without_embedding]
-        embeddings = self.embedding_service.embed_batch(texts)
-        
-        for clause, embedding in zip(clauses_without_embedding, embeddings):
-            clause.embedding = embedding
+        # 세그먼트 기법 적용: text_norm에 // 구분자가 있으면 분할
+        for clause in clauses_without_embedding:
+            text_norm = clause.text_norm or clause.text
+            
+            # // 구분자로 세그먼트 분할
+            if '//' in text_norm:
+                segments = [seg.strip() for seg in text_norm.split('//') if seg.strip()]
+                
+                if len(segments) > 1:
+                    # 각 세그먼트를 개별 임베딩
+                    logger.info(f"✅ Clause {clause.id}: {len(segments)} segments found - applying segment embedding")
+                    segment_embeddings = self.embedding_service.embed_batch(segments)
+                    
+                    # 평균 임베딩 계산
+                    valid_embeddings = [emb for emb in segment_embeddings if emb is not None]
+                    if valid_embeddings:
+                        clause.embedding = np.mean(valid_embeddings, axis=0)
+                        logger.info(f"✅ Clause {clause.id}: averaged {len(valid_embeddings)} segment embeddings")
+                    else:
+                        # 세그먼트 임베딩 실패 시 전체 텍스트로 임베딩
+                        clause.embedding = self.embedding_service.generate_embedding(text_norm)
+                else:
+                    # 세그먼트가 1개만 있으면 그대로 임베딩
+                    clause.embedding = self.embedding_service.generate_embedding(text_norm)
+            else:
+                # // 구분자가 없으면 그대로 임베딩
+                clause.embedding = self.embedding_service.generate_embedding(text_norm)
         
         return clauses
+    
+    def _find_unmatched_user_clauses(
+        self,
+        user_clauses: List[ClauseData],
+        matched_user_ids: set,
+        standard_clauses: List[ClauseData]
+    ) -> List:
+        """
+        매칭되지 않은 사용자 조문을 찾고 가장 유사한 표준 조문을 찾음
+        
+        Args:
+            user_clauses: 사용자 계약서 조문 리스트
+            matched_user_ids: 이미 매칭된 사용자 조문 ID 집합
+            standard_clauses: 표준 계약서 조문 리스트
+        
+        Returns:
+            UnmatchedUserClause 객체 리스트
+        """
+        from backend.shared.models import UnmatchedUserClause
+        
+        unmatched_results = []
+        
+        # FAISS 인덱스 구축 (표준 조문으로)
+        embeddings_array = np.array([c.embedding for c in standard_clauses], dtype=np.float32)
+        dimension = embeddings_array.shape[1]
+        faiss_index = faiss.IndexFlatL2(dimension)
+        faiss_index.add(embeddings_array)
+        
+        for user_clause in user_clauses:
+            # 이미 매칭된 조문은 스킵
+            if user_clause.id in matched_user_ids:
+                continue
+            
+            # 가장 유사한 표준 조문 찾기 (FAISS 사용)
+            try:
+                query_vector = np.array([user_clause.embedding], dtype=np.float32)
+                distances, indices = faiss_index.search(query_vector, k=1)
+                
+                if len(indices[0]) > 0:
+                    idx = indices[0][0]
+                    distance = distances[0][0]
+                    closest_standard = standard_clauses[idx]
+                    similarity = 1.0 / (1.0 + float(distance))
+                    
+                    unmatched_results.append(UnmatchedUserClause(
+                        user_clause=user_clause,
+                        closest_standard=closest_standard,
+                        similarity_score=similarity
+                    ))
+                    
+                    logger.debug(
+                        f"Unmatched user clause {user_clause.id} - "
+                        f"closest: {closest_standard.id} (score: {similarity:.2f})"
+                    )
+                else:
+                    # 검색 결과가 없는 경우
+                    unmatched_results.append(UnmatchedUserClause(
+                        user_clause=user_clause,
+                        closest_standard=None,
+                        similarity_score=0.0
+                    ))
+                    
+            except Exception as e:
+                logger.warning(f"Error finding closest standard for {user_clause.id}: {e}")
+                unmatched_results.append(UnmatchedUserClause(
+                    user_clause=user_clause,
+                    closest_standard=None,
+                    similarity_score=0.0
+                ))
+        
+        logger.info(f"Found {len(unmatched_results)} unmatched user clauses")
+        return unmatched_results
+    
+    def _verify_missing_clauses_forward(
+        self,
+        missing_clauses: List[ClauseData],
+        user_clauses: List[ClauseData],
+        faiss_index,
+        standard_clauses: List[ClauseData]
+    ) -> List:
+        """
+        누락된 표준 조문을 정방향으로 재검증 (FAISS Top-3 + LLM 분석)
+        
+        Args:
+            missing_clauses: 역방향에서 매칭 안 된 표준 조문들
+            user_clauses: 사용자 계약서 조문 리스트
+            faiss_index: 표준 조문 FAISS 인덱스 (사용 안 함)
+            standard_clauses: 표준 계약서 조문 리스트 (사용 안 함)
+        
+        Returns:
+            MissingClauseAnalysis 객체 리스트
+        """
+        from backend.shared.models import MissingClauseAnalysis
+        
+        analysis_results = []
+        
+        # 사용자 조문으로 FAISS 인덱스 구축
+        user_embeddings = np.array([c.embedding for c in user_clauses], dtype=np.float32)
+        user_faiss_index = faiss.IndexFlatL2(user_embeddings.shape[1])
+        user_faiss_index.add(user_embeddings)
+        
+        logger.info(f"Starting forward verification for {len(missing_clauses)} missing clauses...")
+        
+        for i, missing_clause in enumerate(missing_clauses):
+            logger.info(f"Forward verifying missing clause {i+1}/{len(missing_clauses)}: {missing_clause.id}")
+            
+            # 정방향 검색: 표준 조문 → 사용자 조문 (Top-3)
+            query_vector = np.array([missing_clause.embedding], dtype=np.float32)
+            distances, indices = user_faiss_index.search(query_vector, k=3)
+            
+            # Top-3 후보 수집
+            top3_candidates = []
+            for idx, distance in zip(indices[0], distances[0]):
+                candidate = user_clauses[idx]
+                similarity = 1.0 / (1.0 + float(distance))
+                top3_candidates.append({
+                    'clause': candidate,
+                    'similarity': similarity,
+                    'distance': float(distance)
+                })
+            
+            # LLM으로 Top-3 배치 검증
+            candidates_for_llm = [
+                (candidate_info['clause'], candidate_info['similarity'])
+                for candidate_info in top3_candidates
+            ]
+            
+            batch_result = self.llm_verification.verify_missing_clause_forward_batch(
+                standard_clause=missing_clause,
+                user_candidates=candidates_for_llm
+            )
+            
+            # 배치 결과를 개별 결과로 변환
+            llm_results = []
+            for i, candidate_info in enumerate(top3_candidates):
+                candidate = candidate_info['clause']
+                batch_candidate = batch_result['candidates'][i] if i < len(batch_result['candidates']) else None
+                
+                if batch_candidate:
+                    llm_decision = VerificationDecision(
+                        is_match=batch_candidate.get('is_match', False),
+                        confidence=batch_candidate.get('confidence', 0.0),
+                        reasoning=batch_candidate.get('reasoning', ''),
+                        recommendation=batch_candidate.get('recommendation', None)
+                    )
+                else:
+                    llm_decision = VerificationDecision(
+                        is_match=False,
+                        confidence=0.0,
+                        reasoning="배치 검증 결과 없음",
+                        recommendation=None
+                    )
+                
+                llm_results.append({
+                    'candidate': candidate,
+                    'similarity': candidate_info['similarity'],
+                    'llm_decision': llm_decision
+                })
+                
+                logger.debug(
+                    f"  Candidate {candidate.id}: "
+                    f"similarity={candidate_info['similarity']:.3f}, "
+                    f"match={llm_decision.is_match}, "
+                    f"confidence={llm_decision.confidence:.2f}"
+                )
+            
+            # 근거, 리스크, 권고 생성 (배치 summary 포함)
+            evidence, risk_assessment, recommendation = \
+                self._analyze_missing_clause_with_llm(
+                    missing_clause=missing_clause,
+                    llm_results=llm_results,
+                    batch_summary=batch_result.get('summary', ''),
+                    overall_risk=batch_result.get('overall_risk', '')
+                )
+            
+            # 가장 유사한 후보 선택 (LLM 신뢰도 기준)
+            best_candidate = max(llm_results, key=lambda x: x['llm_decision'].confidence)
+            
+            analysis_results.append(MissingClauseAnalysis(
+                standard_clause=missing_clause,
+                closest_user=best_candidate['candidate'],
+                forward_similarity=best_candidate['similarity'],
+                recommendation=recommendation,
+                evidence=evidence,
+                risk_assessment=risk_assessment,
+                top3_candidates=llm_results  # Top-3 후보 모두 저장
+            ))
+            
+            logger.info(
+                f"  Analysis complete for {missing_clause.id}, "
+                f"best_candidate={best_candidate['candidate'].id}"
+            )
+        
+        logger.info(f"Forward verification completed for {len(missing_clauses)} missing clauses")
+        return analysis_results
+    
+    def _analyze_missing_clause_with_llm(
+        self,
+        missing_clause: ClauseData,
+        llm_results: List[Dict],
+        batch_summary: str = "",
+        overall_risk: str = ""
+    ) -> tuple:
+        """
+        LLM 결과를 기반으로 누락 조문 분석
+        
+        Args:
+            missing_clause: 누락된 표준 조문
+            llm_results: Top-3 후보에 대한 LLM 검증 결과
+            batch_summary: 배치 검증 종합 분석
+            overall_risk: 전체 위험 평가
+        
+        Returns:
+            (evidence, risk_assessment, recommendation)
+        """
+        # 가장 높은 신뢰도의 결과 찾기
+        best_result = max(llm_results, key=lambda x: x['llm_decision'].confidence)
+        
+        # 1. 근거 (Evidence) 생성 - 자연스러운 문단 형식
+        evidence_parts = []
+        
+        # 배치 summary를 먼저 추가 (전체 맥락 제공)
+        if batch_summary:
+            evidence_parts.append(f"{batch_summary}\n")
+        
+        # Top-3 후보 상세 분석
+        evidence_parts.append(f"\n**상세 분석 (Top-3 유사 조문):**\n")
+        
+        for i, result in enumerate(llm_results, 1):
+            candidate = result['candidate']
+            similarity = result['similarity']
+            llm_decision = result['llm_decision']
+            
+            evidence_parts.append(f"\n{i}. 사용자 조문 '{candidate.id}' (유사도: {similarity:.2f})")
+            evidence_parts.append(f"\n   {llm_decision.reasoning}")
+        
+        evidence = "".join(evidence_parts)
+        
+        # 2. Risk Assessment - overall_risk 사용 (시나리오 형식)
+        risk_assessment = overall_risk if overall_risk else (
+            f"이 조항이 없으면 계약 이행 과정에서 불명확성이 발생할 수 있습니다."
+        )
+        
+        # 3. Recommendation - LLM 결과에서 추출 (가장 높은 신뢰도 결과 사용)
+        recommendation = best_result['llm_decision'].recommendation if best_result['llm_decision'].recommendation else (
+            f"'{missing_clause.title}' 조항을 추가할 것을 권장합니다."
+        )
+        
+        return evidence, risk_assessment, recommendation
+
     
     def load_and_verify(
         self,

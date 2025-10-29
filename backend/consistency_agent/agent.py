@@ -82,12 +82,24 @@ def verify_contract_task(contract_id: str):
         
         # ClauseData로 변환
         from backend.consistency_agent.node_1_clause_matching.models import ClauseData
+        
+        # unit_type을 type으로 매핑
+        def map_unit_type_to_type(unit_type):
+            """unit_type을 표준 type으로 변환"""
+            mapping = {
+                'clause': '항',
+                'articleText': '조',
+                'subClause': '호',
+                'article': '조'
+            }
+            return mapping.get(unit_type, unit_type)
+        
         user_clauses = [
             ClauseData(
                 id=chunk['id'],
                 title=chunk.get('title', ''),
                 subtitle=None,
-                type=chunk.get('unit_type', 'article'),
+                type=map_unit_type_to_type(chunk.get('unit_type', 'article')),
                 text=chunk.get('text_raw', ''),
                 text_norm=chunk.get('text_norm', ''),
                 breadcrumb=chunk.get('title', ''),

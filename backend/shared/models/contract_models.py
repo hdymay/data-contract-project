@@ -98,10 +98,12 @@ class VerificationDecision:
         is_match: 매칭 여부
         confidence: 신뢰도 (0.0 ~ 1.0)
         reasoning: 판단 근거
+        recommendation: 권고사항 (선택적, 정방향 검증에서 사용)
     """
     is_match: bool
     confidence: float
     reasoning: str
+    recommendation: Optional[str] = None
     
     def __post_init__(self):
         """Validate confidence score"""
@@ -161,6 +163,46 @@ class MatchResult:
 
 
 @dataclass
+class UnmatchedUserClause:
+    """
+    매칭되지 않은 사용자 조문 정보
+    
+    Attributes:
+        user_clause: 매칭 안 된 사용자 조문
+        closest_standard: 가장 유사한 표준 조문 (있다면)
+        similarity_score: 유사도 점수
+        llm_analysis: LLM 분석 결과 (선택적)
+    """
+    user_clause: ClauseData
+    closest_standard: Optional[ClauseData] = None
+    similarity_score: float = 0.0
+    llm_analysis: Optional[str] = None
+
+
+@dataclass
+class MissingClauseAnalysis:
+    """
+    누락된 표준 조문 분석 결과
+    
+    Attributes:
+        standard_clause: 누락된 표준 조문
+        closest_user: 정방향 검색에서 가장 유사한 사용자 조문
+        forward_similarity: 정방향 검색 유사도
+        recommendation: 권고사항
+        evidence: 근거 (왜 누락으로 판단되었는지)
+        risk_assessment: 리스크 평가 (이 조항이 없을 때의 위험)
+        top3_candidates: Top-3 후보 및 LLM 판단 결과
+    """
+    standard_clause: ClauseData
+    closest_user: Optional[ClauseData] = None
+    forward_similarity: float = 0.0
+    recommendation: str = ""
+    evidence: str = ""
+    risk_assessment: str = ""
+    top3_candidates: List = field(default_factory=list)
+
+
+@dataclass
 class VerificationResult:
     """
     전체 검증 결과를 표현하는 모델
@@ -168,9 +210,11 @@ class VerificationResult:
     Attributes:
         total_standard_clauses: 표준 계약서 총 조문 수
         matched_clauses: 매칭된 조문 수
-        missing_clauses: 누락된 조문 목록
+        missing_clauses: 누락된 조문 목록 (표준에는 있는데 사용자에 없음)
         match_results: 상세 매칭 결과
         duplicate_matches: 중복 매칭 목록
+        unmatched_user_clauses: 매칭 안 된 사용자 조문 목록 (사용자에는 있는데 표준에 없음)
+        missing_clause_analysis: 누락 조문 양방향 분석 결과
         total_user_clauses: 사용자 계약서 총 조문 수
         verification_date: 검증 수행 일시
         is_complete: 모든 조문 존재 여부
@@ -180,6 +224,8 @@ class VerificationResult:
     missing_clauses: List[ClauseData]
     match_results: List[MatchResult]
     duplicate_matches: List[MatchResult] = field(default_factory=list)
+    unmatched_user_clauses: List[UnmatchedUserClause] = field(default_factory=list)
+    missing_clause_analysis: List = field(default_factory=list)  # List[MissingClauseAnalysis]
     total_user_clauses: int = 0
     verification_date: datetime = field(default_factory=datetime.now)
     is_complete: bool = field(init=False)
@@ -233,6 +279,25 @@ class VerificationResult:
             "missing_clauses": [clause.to_dict() for clause in self.missing_clauses],
             "match_results": [result.to_dict() for result in self.match_results],
             "duplicate_matches": [result.to_dict() for result in self.duplicate_matches],
+            "unmatched_user_clauses": [
+                {
+                    "user_clause": uc.user_clause.to_dict(),
+                    "closest_standard": uc.closest_standard.to_dict() if uc.closest_standard else None,
+                    "similarity_score": uc.similarity_score
+                }
+                for uc in self.unmatched_user_clauses
+            ],
+            "missing_clause_analysis": [
+                {
+                    "standard_clause": mca.standard_clause.to_dict(),
+                    "closest_user": mca.closest_user.to_dict() if mca.closest_user else None,
+                    "forward_similarity": mca.forward_similarity,
+                    "recommendation": mca.recommendation,
+                    "evidence": mca.evidence,
+                    "risk_assessment": mca.risk_assessment
+                }
+                for mca in self.missing_clause_analysis
+            ],
         }
     
     @classmethod
@@ -286,12 +351,39 @@ class VerificationResult:
                 duplicate_reason=result_data.get('duplicate_reason'),
             ))
         
+        # Parse unmatched_user_clauses
+        unmatched_user_clauses = []
+        for uc_data in data.get('unmatched_user_clauses', []):
+            user_clause = ClauseData(**uc_data['user_clause'])
+            closest_standard = ClauseData(**uc_data['closest_standard']) if uc_data.get('closest_standard') else None
+            unmatched_user_clauses.append(UnmatchedUserClause(
+                user_clause=user_clause,
+                closest_standard=closest_standard,
+                similarity_score=uc_data.get('similarity_score', 0.0)
+            ))
+        
+        # Parse missing_clause_analysis
+        missing_clause_analysis = []
+        for mca_data in data.get('missing_clause_analysis', []):
+            standard_clause = ClauseData(**mca_data['standard_clause'])
+            closest_user = ClauseData(**mca_data['closest_user']) if mca_data.get('closest_user') else None
+            missing_clause_analysis.append(MissingClauseAnalysis(
+                standard_clause=standard_clause,
+                closest_user=closest_user,
+                forward_similarity=mca_data.get('forward_similarity', 0.0),
+                recommendation=mca_data.get('recommendation', ''),
+                evidence=mca_data.get('evidence', ''),
+                risk_assessment=mca_data.get('risk_assessment', '')
+            ))
+        
         return cls(
             total_standard_clauses=data['total_standard_clauses'],
             matched_clauses=data['matched_clauses'],
             missing_clauses=missing_clauses,
             match_results=match_results,
             duplicate_matches=duplicate_matches,
+            unmatched_user_clauses=unmatched_user_clauses,
+            missing_clause_analysis=missing_clause_analysis,
             total_user_clauses=data.get('total_user_clauses', 0),
             verification_date=verification_date,
         )
