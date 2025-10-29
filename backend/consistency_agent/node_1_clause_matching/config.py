@@ -49,6 +49,11 @@ class Config:
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "info").upper()
     
+    # Parallel Processing Settings
+    PARALLEL_ENABLED: bool = os.getenv("PARALLEL_ENABLED", "true").lower() == "true"
+    PARALLEL_MAX_WORKERS: int = int(os.getenv("PARALLEL_MAX_WORKERS", "5"))
+    PARALLEL_THRESHOLD: int = int(os.getenv("PARALLEL_THRESHOLD", "10"))  # 10개 이상일 때만 병렬 처리
+    
     @classmethod
     def validate(cls) -> bool:
         """Validate required configuration settings"""
