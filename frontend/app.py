@@ -81,7 +81,7 @@ def main() -> None:
                         metadata = data.get('parsed_metadata', {})
                         st.write("**파싱 결과**")
                         st.write(f"- 인식된 조항: {metadata.get('recognized_articles', 0)}개")
-                        st.write(f"- 신뢰도: {metadata.get('confidence', 0):.2%}")
+                        # 파싱 신뢰도는 항상 1.0이므로 표시하지 않음
                         
                         # 구조화된 데이터 미리보기
                         with st.expander("📄 계약서 구조 미리보기"):
@@ -151,10 +151,18 @@ def main() -> None:
                             predicted_type = classification.get('predicted_type')
                             confidence = classification.get('confidence', 0)
                             scores = classification.get('scores', {})
+                            classification_method = classification.get('classification_method', 'unknown')
                             
                             # 분류 결과 표시
                             st.success(f"✅ 분류 완료: **{type_names.get(predicted_type, predicted_type)}**")
-                            st.write(f"**신뢰도**: {confidence:.2%}")
+                            
+                            # 신뢰도 표시 (분류 방법에 따라 다르게 표시)
+                            if classification_method == 'embedding':
+                                st.write(f"**분류 신뢰도**: {confidence:.2%} (임베딩 기반)")
+                            elif classification_method == 'llm_fewshot':
+                                st.write(f"**분류 신뢰도**: {confidence:.2%} (LLM 정밀 분석)")
+                            else:
+                                st.write(f"**분류 신뢰도**: {confidence:.2%}")
                             
                             # 각 유형별 점수 표시
                             with st.expander("📊 유형별 유사도 점수"):
