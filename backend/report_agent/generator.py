@@ -43,7 +43,7 @@ class ReportGenerator:
         self.llm_client = AzureOpenAI(
             api_key=config.AZURE_OPENAI_API_KEY,
             api_version=config.AZURE_OPENAI_API_VERSION,
-            azure_endpoint=config.AZURE_OPENAI_ENDPOINT
+            azure_endpoint=config.AZURE_ENDPOINT
         )
         
         logger.info(f"Report Generator initialized with output_dir: {self.output_dir}")
@@ -155,7 +155,7 @@ class ReportGenerator:
 
         try:
             response = self.llm_client.chat.completions.create(
-                model=config.AZURE_OPENAI_DEPLOYMENT_NAME,
+                model=config.AZURE_LLM_DEPLOYMENT,
                 messages=[
                     {"role": "system", "content": "당신은 계약서 분석 전문가입니다."},
                     {"role": "user", "content": prompt}
@@ -261,36 +261,36 @@ class ReportGenerator:
             report_lines.append("─" * 60)
             report_lines.append("")
         
-        # 항별 상세 매칭 결과
-        matched_clauses = [r for r in result.match_results if r.is_matched]
-        
-        report_lines.append("-" * 80)
-        report_lines.append("✅ 내 계약서 항별 상세 매칭 결과")
-        report_lines.append("-" * 80)
-        report_lines.append("")
-        
-        if matched_clauses:
-            report_lines.append(f"총 {len(matched_clauses)}개 항이 표준 계약서와 매칭되었습니다.")
-            report_lines.append("")
-            
-            for i, match_result in enumerate(matched_clauses, 1):
-                user_clause = match_result.matched_clause
-                std_clause = match_result.standard_clause
-                
-                report_lines.append(f"[{i}] {user_clause.display_title}")
-                report_lines.append(f"    ID: {user_clause.id}")
-                report_lines.append(f"    내용: {user_clause.text[:120]}{'...' if len(user_clause.text) > 120 else ''}")
-                report_lines.append("")
-                report_lines.append(f"    ✓ 매칭: 표준 {std_clause.display_title} ({std_clause.id})")
-                
-                if match_result.llm_decision:
-                    report_lines.append(f"       신뢰도: {match_result.llm_decision.confidence:.0%}")
-                    report_lines.append(f"       판단: {match_result.llm_decision.reasoning[:180]}{'...' if len(match_result.llm_decision.reasoning) > 180 else ''}")
-                
-                report_lines.append("")
-        else:
-            report_lines.append("⚠️ 매칭된 항이 없습니다.")
-            report_lines.append("")
+        # 항별 상세 매칭 결과 (주석 처리)
+        # matched_clauses = [r for r in result.match_results if r.is_matched]
+        # 
+        # report_lines.append("-" * 80)
+        # report_lines.append("✅ 내 계약서 항별 상세 매칭 결과")
+        # report_lines.append("-" * 80)
+        # report_lines.append("")
+        # 
+        # if matched_clauses:
+        #     report_lines.append(f"총 {len(matched_clauses)}개 항이 표준 계약서와 매칭되었습니다.")
+        #     report_lines.append("")
+        #     
+        #     for i, match_result in enumerate(matched_clauses, 1):
+        #         user_clause = match_result.matched_clause
+        #         std_clause = match_result.standard_clause
+        #         
+        #         report_lines.append(f"[{i}] {user_clause.display_title}")
+        #         report_lines.append(f"    ID: {user_clause.id}")
+        #         report_lines.append(f"    내용: {user_clause.text[:120]}{'...' if len(user_clause.text) > 120 else ''}")
+        #         report_lines.append("")
+        #         report_lines.append(f"    ✓ 매칭: 표준 {std_clause.display_title} ({std_clause.id})")
+        #         
+        #         if match_result.llm_decision:
+        #             report_lines.append(f"       신뢰도: {match_result.llm_decision.confidence:.0%}")
+        #             report_lines.append(f"       판단: {match_result.llm_decision.reasoning[:180]}{'...' if len(match_result.llm_decision.reasoning) > 180 else ''}")
+        #         
+        #         report_lines.append("")
+        # else:
+        #     report_lines.append("⚠️ 매칭된 항이 없습니다.")
+        #     report_lines.append("")
         
         # 누락된 조문
         report_lines.append("-" * 80)
@@ -302,6 +302,12 @@ class ReportGenerator:
             report_lines.append(f"총 {len(result.missing_clauses)}개의 표준 조문이 누락되었습니다.")
             report_lines.append("")
             
+            # missing_clause_analysis가 있으면 정방향 검증 결과 포함
+            analysis_dict = {}
+            if result.missing_clause_analysis:
+                for analysis in result.missing_clause_analysis:
+                    analysis_dict[analysis.standard_clause.id] = analysis
+            
             for i, clause in enumerate(result.missing_clauses, 1):
                 report_lines.append(f"{i}. {clause.display_title}")
                 report_lines.append(f"   표준 조문 ID: {clause.id}")
@@ -311,6 +317,62 @@ class ReportGenerator:
                 if len(clause.text) > 150:
                     text_preview += "..."
                 report_lines.append(f"   내용: {text_preview}")
+                
+                # 정방향 검증 결과 추가
+                if clause.id in analysis_dict:
+                    analysis = analysis_dict[clause.id]
+                    report_lines.append("")
+                    report_lines.append("   📊 표준계약서 누락 재검증 결과 (Top-3 유사 조문):")
+                    report_lines.append("")
+                    
+                    # Top-3 후보 상세 분석
+                    if analysis.top3_candidates:
+                        report_lines.append("   📋 상세 분석:")
+                        report_lines.append("")
+                        
+                        for i, candidate_info in enumerate(analysis.top3_candidates, 1):
+                            candidate = candidate_info['candidate']
+                            similarity = candidate_info['similarity']
+                            llm_decision = candidate_info['llm_decision']
+                            match_type = candidate_info.get('match_type', '무관')
+                            
+                            # 이모지 선택
+                            emoji = "1️⃣" if i == 1 else "2️⃣" if i == 2 else "3️⃣"
+                            
+                            report_lines.append(f"   {emoji} 사용자 {candidate.id} (유사도 {similarity:.2f})")
+                            
+                            # 후보 조문 내용 인용 (100자 제한)
+                            content_preview = candidate.text[:100] + "..." if len(candidate.text) > 100 else candidate.text
+                            report_lines.append(f"   「{content_preview}」")
+                            report_lines.append("")
+                            
+                            # 해설
+                            report_lines.append(f"   → {llm_decision.reasoning}")
+                            report_lines.append("")
+                        
+                        report_lines.append("")
+                    
+                    # 종합 분석 (evidence)
+                    if analysis.evidence:
+                        report_lines.append("   📋 종합 분석:")
+                        for line in analysis.evidence.split('\n'):
+                            if line.strip():
+                                report_lines.append(f"      {line}")
+                        report_lines.append("")
+                    
+                    # 위험 평가
+                    if analysis.risk_assessment:
+                        report_lines.append("   ⚠️ 위험 평가:")
+                        for line in analysis.risk_assessment.split('\n'):
+                            if line.strip():
+                                report_lines.append(f"      {line}")
+                        report_lines.append("")
+                    
+                    # 권고사항
+                    if analysis.recommendation:
+                        report_lines.append("   💡 권고사항:")
+                        report_lines.append(f"      {analysis.recommendation}")
+                
                 report_lines.append("")
         else:
             report_lines.append("✓ 모든 표준 조문이 포함되어 있습니다!")
