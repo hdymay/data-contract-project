@@ -32,12 +32,125 @@ class ClassificationAgent:
         "brokerage_user": "데이터 중개 계약 (이용자용)"
     }
 
+    # Few-shot 예시 (JSON 출력 형식)
+    FEWSHOT_EXAMPLES = """
+예시 1: 데이터 제공형 (provide)
+---
+역할 구조: 데이터제공자가 자신이 보유한 데이터를 데이터이용자에게 제공하거나 접근 권한을 부여하고, 이용자는 그 대가를 지급한다.
+핵심 패턴: "대상데이터 제공", "이용허락", "대가 지급", "비밀유지", "반환 또는 폐기"
+특징: 새 데이터 생성 없음 (기존 데이터의 제공 중심)
+추상 요약: 이미 존재하는 데이터를 일정 조건으로 이용하게 하는 계약. 제공자 → 이용자 방향의 데이터 흐름.
+
+출력:
+{
+  "type": "provide",
+  "confidence": 0.95,
+  "reason": "데이터 제공 및 이용허락 구조 중심, 창출·가공 조항 부재"
+}
+
+
+
+예시 2: 데이터 생성형 (create)
+---
+역할 구조:
+복수의 당사자가 공동으로 데이터를 생성하고, 생성된 데이터(대상데이터 및 파생데이터)의 이용권리, 귀속, 분배를 정한다.
+
+핵심 패턴:
+- “공동 생성”, “파생데이터”, “이용권리 귀속”, “이익분배”, “공동 저작권”
+- 데이터 제공·이용보다 ‘창출’이 핵심
+- 결과물의 소유권·지식재산권 조정이 중요함
+
+추상 요약:
+→ 여러 당사자가 협력하여 데이터를 새로 만드는 계약.
+→ 데이터 흐름이 쌍방향이며 ‘공동 창작’ 중심.
+
+출력:
+{
+  "type": "create",
+  "confidence": "0.93",
+  "reason": "공동 생성과 파생데이터 귀속, 이익분배 조항 존재"
+}
+
+
+
+예시 3: 데이터 가공형 (process)
+---
+역할 구조:
+데이터이용자가 데이터를 제공하면, 데이터가공사업자가 이를 분석·정제·결합하여 가공데이터를 제작하고 납품한다.
+
+핵심 패턴:
+- “가공서비스”, “검수”, “하자보수”, “대가 지급”, “가공데이터 귀속”
+- 원본 데이터를 입력받아 변형·분석·생성하는 행위
+- 공급자는 ‘가공사업자’, 수요자는 ‘이용자’
+
+추상 요약:
+→ 원본 데이터를 입력받아 가공서비스를 수행하는 위탁형 계약.
+→ 산출물은 ‘가공데이터’로 명시됨.
+
+출력:
+{
+  "type": "process",
+  "confidence": "0.96",
+  "reason": "대상데이터 제공·가공·검수 및 하자보수 구조 명확"
+}
+
+
+
+예시 4: 데이터 중개형 - 제공자용 (brokerage_provider)
+---
+역할 구조:
+플랫폼운영자가 데이터 거래 플랫폼을 운영하고, 데이터제공자가 그 플랫폼을 통해 데이터를 판매·유통한다.
+
+핵심 패턴:
+- “플랫폼운영자”, “정산”, “수수료”, “플랫폼서비스”, “광고·프로모션”
+- 제공자는 거래 데이터 등록자, 운영자는 중개자
+- “거래 제한”, “환불”, “청약철회 안내”, “정산 유보” 등이 등장
+
+추상 요약:
+→ 플랫폼을 매개로 데이터를 판매하는 제공자 중심 계약.
+→ 수수료·정산 등 플랫폼 이용 조건 포함.
+
+출력:
+{
+  "type": "brokerage_provider",
+  "confidence": "0.94",
+  "reason": "플랫폼 이용 조항과 정산·수수료 구조 명확, 제공자 중심"
+}
+
+
+예시 5: 데이터 중개형 - 이용자용 (brokerage_user)
+---
+역할 구조:
+플랫폼운영자가 데이터 거래 플랫폼을 운영하고, 데이터제공자가 그 플랫폼을 통해 데이터를 판매·유통한다.
+
+핵심 패턴:
+- “플랫폼운영자”, “정산”, “수수료”, “플랫폼서비스”, “광고·프로모션”
+- 제공자는 거래 데이터 등록자, 운영자는 중개자
+- “거래 제한”, “환불”, “청약철회 안내”, “정산 유보” 등이 등장
+
+추상 요약:
+→ 플랫폼을 매개로 데이터를 판매하는 제공자 중심 계약.
+→ 수수료·정산 등 플랫폼 이용 조건 포함.
+
+출력:
+{
+  "type": "brokerage_user",
+  "confidence": "0.94",
+  "reason": "플랫폼 이용 조항과 정산·수수료 구조 명확, 제공자 중심"
+}
+
+
+"""
+
+    # Gating threshold
+    SCORE_GAP_THRESHOLD = 0.05  # 1위-2위 점수 차이 임계값
+
     def __init__(
         self,
         api_key: str = None,
         azure_endpoint: str = None,
         embedding_model: str = "text-embedding-3-large",
-        chat_model: str = "gpt-4",
+        chat_model: str = None,
         api_version: str = "2024-02-01"
     ):
         """
@@ -51,7 +164,7 @@ class ClassificationAgent:
         self.api_key = api_key or os.getenv("AZURE_OPENAI_API_KEY")
         self.azure_endpoint = azure_endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
         self.embedding_model = embedding_model
-        self.chat_model = chat_model
+        self.chat_model = chat_model or os.getenv("AZURE_LLM_DEPLOYMENT", "gpt-4o")
 
         if not self.api_key or not self.azure_endpoint:
             raise ValueError("Azure OpenAI 자격 증명이 필요합니다")
@@ -106,21 +219,14 @@ class ClassificationAgent:
                 knowledge_base_loader
             )
 
-            # 4. LLM으로 최종 분류
-            predicted_type, confidence, reasoning = self._llm_classify_from_chunks(
-                key_chunks,
-                similarity_scores
+            # 4. Hybrid Gating: 점수 차이에 따라 분류 방법 선택
+            result = self._classify_with_gating(
+                contract_id=contract_id,
+                key_chunks=key_chunks,
+                similarity_scores=similarity_scores
             )
 
-            result = {
-                "contract_id": contract_id,
-                "predicted_type": predicted_type,
-                "confidence": confidence,
-                "scores": similarity_scores,
-                "reasoning": reasoning
-            }
-
-            logger.info(f"분류 완료: {contract_id} -> {predicted_type} (신뢰도: {confidence:.2%})")
+            logger.info(f"분류 완료: {contract_id} -> {result['predicted_type']} (신뢰도: {result['confidence']:.2%})")
             return result
 
         except Exception as e:
@@ -229,13 +335,198 @@ class ClassificationAgent:
         logger.debug(f"유사도 점수: {scores}")
         return scores
 
+    def _classify_with_gating(
+        self,
+        contract_id: str,
+        key_chunks: List[Dict[str, Any]],
+        similarity_scores: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """
+        Hybrid Gating 분류: 점수 차이에 따라 임베딩 또는 LLM 사용
+
+        Args:
+            contract_id: 계약서 ID
+            key_chunks: 주요 청크
+            similarity_scores: 유사도 점수
+
+        Returns:
+            분류 결과 딕셔너리
+        """
+        # 1위와 2위 점수 차이 계산
+        sorted_scores = sorted(similarity_scores.items(), key=lambda x: x[1], reverse=True)
+        top1_type, top1_score = sorted_scores[0]
+        top2_type, top2_score = sorted_scores[1]
+        
+        score_gap = top1_score - top2_score
+        
+        logger.info(f"유사도 점수 - 1위: {top1_type}({top1_score:.3f}), 2위: {top2_type}({top2_score:.3f}), gap: {score_gap:.3f}")
+        
+        # Gating 로직
+        if score_gap >= self.SCORE_GAP_THRESHOLD:
+            # 명확함 → 임베딩 결과 사용
+            logger.info(f"✓ 임베딩 기반 결정 (gap={score_gap:.3f} >= {self.SCORE_GAP_THRESHOLD}): {top1_type}")
+            
+            return {
+                "contract_id": contract_id,
+                "predicted_type": top1_type,
+                "confidence": top1_score,
+                "scores": similarity_scores,
+                "reasoning": f"임베딩 유사도 차이가 충분함 (gap={score_gap:.3f}). 1위: {self.CONTRACT_TYPES[top1_type]}",
+                "classification_method": "embedding",
+                "score_gap": score_gap
+            }
+        else:
+            # 애매함 → LLM few-shot 판단
+            logger.info(f"⚠ LLM 정밀 분류 필요 (gap={score_gap:.3f} < {self.SCORE_GAP_THRESHOLD})")
+            
+            predicted_type, confidence, reasoning = self._llm_classify_with_fewshot(
+                key_chunks,
+                similarity_scores
+            )
+            
+            return {
+                "contract_id": contract_id,
+                "predicted_type": predicted_type,
+                "confidence": confidence,
+                "scores": similarity_scores,
+                "reasoning": reasoning,
+                "classification_method": "llm_fewshot",
+                "score_gap": score_gap
+            }
+
+    def _llm_classify_with_fewshot(
+        self,
+        key_chunks: List[Dict[str, Any]],
+        similarity_scores: Dict[str, float]
+    ) -> Tuple[str, float, str]:
+        """
+        Few-shot 기반 LLM 분류 (역할-키워드 중심)
+
+        Args:
+            key_chunks: 주요 청크
+            similarity_scores: 유사도 점수
+
+        Returns:
+            (predicted_type, confidence, reasoning)
+        """
+        # 청크에서 텍스트 추출
+        chunks_text = "\n\n".join([
+            f"[청크 {i+1}]\n제목: {chunk.get('title', '(제목 없음)')}\n내용: {chunk.get('text_norm', chunk.get('text_raw', ''))[:300]}..."
+            for i, chunk in enumerate(key_chunks[:5])
+        ])
+
+        scores_text = "\n".join([
+            f"- {self.CONTRACT_TYPES[t]}: {score:.3f}"
+            for t, score in sorted(similarity_scores.items(), key=lambda x: x[1], reverse=True)
+        ])
+
+        prompt = f"""당신은 데이터 계약서 분류 전문가입니다.
+
+다음은 5가지 데이터 계약 유형의 특징과 출력 예시입니다:
+
+{self.FEWSHOT_EXAMPLES}
+
+---
+
+이제 사용자가 업로드한 계약서의 주요 내용을 분석해주세요:
+
+{chunks_text}
+
+임베딩 유사도 점수 (참고용):
+{scores_text}
+
+**분석 지침**:
+1. 역할 구조를 파악하세요 (제공자↔이용자, 위탁자↔수탁자, 중개자 포함 여부)
+2. 핵심 패턴을 찾으세요:
+   - 제공형: "대상데이터", "이용허락", "대가지급", "반환/폐기"
+   - 생성형: "생성 의무", "제작", "납품", "검수"
+   - 가공형: "가공 업무", "변환", "정제", "품질 기준"
+   - 중개형: "중개", "플랫폼", "제공자/이용자로서"
+3. 데이터 흐름 방향을 확인하세요 (제공, 생성, 가공, 중개)
+
+**출력 형식** (반드시 JSON만 출력):
+{{
+  "type": "[provide|create|process|brokerage_provider|brokerage_user]",
+  "confidence": [0.0-1.0],
+  "reason": "[역할 구조와 핵심 패턴 기반 판단 근거]"
+}}
+"""
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.chat_model,
+                messages=[
+                    {"role": "system", "content": "당신은 데이터 계약서 분류 전문가입니다. 역할 구조와 핵심 패턴을 중심으로 정확히 판단하고, 반드시 JSON 형식으로만 응답합니다."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=600,
+                response_format={"type": "json_object"}  # JSON 모드 강제
+            )
+
+            answer = response.choices[0].message.content.strip()
+            logger.debug(f"LLM 응답:\n{answer}")
+
+            # JSON 파싱
+            import json
+            try:
+                result = json.loads(answer)
+                predicted_type = result.get("type")
+                confidence = float(result.get("confidence", 0.6))
+                reasoning = result.get("reason", "")
+                
+                # 유효성 검증
+                if predicted_type not in self.CONTRACT_TYPES:
+                    raise ValueError(f"잘못된 유형: {predicted_type}")
+                    
+            except (json.JSONDecodeError, ValueError, KeyError) as e:
+                logger.warning(f"JSON 파싱 실패: {e}, 폴백 파싱 시도")
+                # 폴백: 텍스트 파싱
+                predicted_type = None
+                confidence = 0.6
+                reasoning = answer
+
+                for line in answer.split("\n"):
+                    if "type" in line.lower() or "유형" in line:
+                        for t in self.CONTRACT_TYPES.keys():
+                            if t in line:
+                                predicted_type = t
+                                break
+                    elif "confidence" in line.lower() or "신뢰도" in line:
+                        try:
+                            import re
+                            conf_match = re.search(r'0\.\d+', line)
+                            if conf_match:
+                                confidence = float(conf_match.group())
+                        except:
+                            pass
+                    elif "reason" in line.lower() or "이유" in line:
+                        reasoning = line.split(":", 1)[-1].strip()
+
+            # 예외 처리: LLM이 유형을 명시하지 않은 경우
+            if not predicted_type:
+                predicted_type = max(similarity_scores.items(), key=lambda x: x[1])[0]
+                confidence = max(similarity_scores.values())
+                reasoning = f"LLM 파싱 실패. 최고 유사도 기반 분류: {reasoning}"
+                logger.warning(f"LLM 응답 파싱 실패, 폴백 사용: {predicted_type}")
+
+            return predicted_type, confidence, reasoning
+
+        except Exception as e:
+            logger.error(f"LLM 분류 실패: {e}")
+            # Fallback: 유사도 기반
+            predicted_type = max(similarity_scores.items(), key=lambda x: x[1])[0]
+            confidence = max(similarity_scores.values())
+            reasoning = f"LLM 호출 실패. 유사도 기반 분류."
+            return predicted_type, confidence, reasoning
+
     def _llm_classify_from_chunks(
         self,
         key_chunks: List[Dict[str, Any]],
         similarity_scores: Dict[str, float]
     ) -> Tuple[str, float, str]:
         """
-        청크 기반 LLM 분류
+        청크 기반 LLM 분류 (레거시, 하위 호환용)
 
         Args:
             key_chunks: 주요 청크
