@@ -11,6 +11,7 @@ from backend.shared.models import (
     VerificationDecision,
     MatchResult,
     VerificationResult,
+    UnmatchedUserClause,
     ContractDocument,
     ClassificationResult
 )
@@ -21,6 +22,7 @@ __all__ = [
     "VerificationDecision",
     "MatchResult",
     "VerificationResult",
+    "UnmatchedUserClause",
     "ContractDocument",
     "ClassificationResult"
 ]
