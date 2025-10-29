@@ -7,6 +7,8 @@ from .contract_models import (
     VerificationDecision,
     MatchResult,
     VerificationResult,
+    UnmatchedUserClause,
+    MissingClauseAnalysis,
     ContractDocument,
     ClassificationResult
 )
@@ -16,6 +18,8 @@ __all__ = [
     "VerificationDecision",
     "MatchResult",
     "VerificationResult",
+    "UnmatchedUserClause",
+    "MissingClauseAnalysis",
     "ContractDocument",
     "ClassificationResult"
 ]
