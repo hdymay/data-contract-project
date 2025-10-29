@@ -229,12 +229,13 @@ class WhooshIndexer:
                 logger.debug(f"이스케이프된 쿼리: {escaped_query[:100]}...")
 
                 # text_norm과 title 필드에서 검색
-                from whoosh.qparser import QueryParser
+                from whoosh.qparser import QueryParser, OrGroup
                 from whoosh.query import Or
-                
+
                 # 각 필드별로 쿼리 파싱
-                parser_text = QueryParser("text_norm", schema=self.ix.schema)
-                parser_title = QueryParser("title", schema=self.ix.schema)
+                # OrGroup: 기본 AND 대신 OR 연산자 사용 (더 관대한 매칭)
+                parser_text = QueryParser("text_norm", schema=self.ix.schema, group=OrGroup)
+                parser_title = QueryParser("title", schema=self.ix.schema, group=OrGroup)
                 
                 # 쿼리 파싱
                 query_text = parser_text.parse(escaped_query)
