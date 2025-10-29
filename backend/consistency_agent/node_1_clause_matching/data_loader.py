@@ -638,8 +638,12 @@ class ContractDataLoader:
                     exhibit_key = f"별지{ref_num}"
                     if exhibit_key in exhibit_map:
                         for exhibit_clause in exhibit_map[exhibit_key]:
-                            exhibit_contents_raw.append(exhibit_clause.text)
-                            exhibit_contents_norm.append(exhibit_clause.text_norm or exhibit_clause.text)
+                            # 별지 내용에 참조 조항 정보 추가
+                            exhibit_with_ref = f"[{clause.title} 참조] {exhibit_clause.text}"
+                            exhibit_norm_with_ref = f"[{clause.title} 참조] {exhibit_clause.text_norm or exhibit_clause.text}"
+                            
+                            exhibit_contents_raw.append(exhibit_with_ref)
+                            exhibit_contents_norm.append(exhibit_norm_with_ref)
                         self.logger.debug(f"조문 '{clause.id}'에 {exhibit_key} 내용 병합")
                 
                 # 별지 내용이 있으면 병합
