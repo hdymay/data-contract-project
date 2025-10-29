@@ -36,35 +36,75 @@ class HybridSearcher:
         """
         self.client = azure_client
         self.embedding_model = embedding_model
-        self.dense_weight = dense_weight
-        self.sparse_weight = 1.0 - dense_weight
+        self._dense_weight = dense_weight
+        
+        # 필드 가중치 (본문:제목 = 7:3)
+        self.text_weight = 0.7
+        self.title_weight = 0.3
         
         # 로드된 인덱스
-        self.faiss_index = None
+        self.faiss_index = None  # Deprecated: 하위 호환성을 위해 유지
+        self.faiss_index_text = None  # text_norm 인덱스
+        self.faiss_index_title = None  # title 인덱스
         self.chunks = None
         self.whoosh_indexer = None
         
-        logger.info(f"HybridSearcher 초기화 (Dense: {dense_weight:.2f}, Sparse: {self.sparse_weight:.2f})")
+        logger.info(f"HybridSearcher 초기화 (Dense: {self.dense_weight:.2f}, Sparse: {self.sparse_weight:.2f})")
+        logger.info(f"필드 가중치 (본문: {self.text_weight:.2f}, 제목: {self.title_weight:.2f})")
     
     def load_indexes(
         self,
-        faiss_index,
+        faiss_index_text,
+        faiss_index_title,
         chunks: List[Dict],
         whoosh_indexer
     ):
         """
-        인덱스 로드
+        인덱스 로드 (이중 FAISS 인덱스)
         
         Args:
-            faiss_index: FAISS 인덱스
+            faiss_index_text: text_norm FAISS 인덱스
+            faiss_index_title: title FAISS 인덱스
             chunks: 청크 메타데이터 리스트
             whoosh_indexer: Whoosh 인덱서
         """
-        self.faiss_index = faiss_index
+        # 단일 인덱스 인자 감지 (하위 호환성 체크)
+        if not isinstance(faiss_index_text, tuple) and faiss_index_title is None:
+            raise ValueError(
+                "단일 FAISS 인덱스는 더 이상 지원되지 않습니다. "
+                "KnowledgeBaseLoader.load_faiss_indexes()를 사용하여 "
+                "두 개의 인덱스(text, title)를 로드하세요."
+            )
+        
+        self.faiss_index_text = faiss_index_text
+        self.faiss_index_title = faiss_index_title
         self.chunks = chunks
         self.whoosh_indexer = whoosh_indexer
         
+        # 하위 호환성을 위해 faiss_index도 설정 (deprecated)
+        self.faiss_index = faiss_index_text
+        
         logger.info(f"인덱스 로드 완료: {len(chunks)} chunks")
+        logger.info(f"  - text_norm 인덱스: {faiss_index_text.ntotal if faiss_index_text else 0} vectors")
+        logger.info(f"  - title 인덱스: {faiss_index_title.ntotal if faiss_index_title else 0} vectors")
+    
+    @property
+    def dense_weight(self) -> float:
+        """Dense 가중치 getter"""
+        return self._dense_weight
+    
+    @dense_weight.setter
+    def dense_weight(self, value: float):
+        """Dense 가중치 setter (Sparse 가중치 자동 계산)"""
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(f"Dense 가중치는 0~1 사이여야 합니다: {value}")
+        self._dense_weight = value
+        logger.debug(f"가중치 업데이트: Dense={value:.2f}, Sparse={1.0-value:.2f}")
+    
+    @property
+    def sparse_weight(self) -> float:
+        """Sparse 가중치 getter (자동 계산)"""
+        return 1.0 - self._dense_weight
     
     def embed_query(self, query: str, contract_id: str = None) -> np.ndarray:
         """
@@ -102,79 +142,150 @@ class HybridSearcher:
             logger.error(f"쿼리 임베딩 실패: {e}")
             raise
     
-    def dense_search(self, query: str, top_k: int = 50, contract_id: str = None) -> List[Dict[str, Any]]:
+    def dense_search(
+        self,
+        text_query: str,
+        title_query: str,
+        top_k: int = 50,
+        contract_id: str = None
+    ) -> List[Dict[str, Any]]:
         """
-        Dense 검색 (FAISS 벡터 유사도)
+        Dense 검색 (FAISS 벡터 유사도) - 제목/본문 분리
 
         Args:
-            query: 검색 쿼리
+            text_query: 본문 검색 쿼리
+            title_query: 제목 검색 쿼리
             top_k: 반환할 결과 개수
             contract_id: 계약서 ID (토큰 로깅용)
 
         Returns:
-            검색 결과 리스트
+            검색 결과 리스트 (text_score, title_score 포함)
         """
-        if self.faiss_index is None or self.chunks is None:
+        if self.faiss_index_text is None or self.faiss_index_title is None or self.chunks is None:
             logger.error("FAISS 인덱스가 로드되지 않았습니다")
             return []
 
         try:
-            # 쿼리 임베딩
-            query_vector = self.embed_query(query, contract_id)
+            # 1. 본문 쿼리 임베딩 및 검색
+            text_results = {}
+            if text_query and text_query.strip():
+                text_vector = self.embed_query(text_query, contract_id)
+                distances, indices = self.faiss_index_text.search(
+                    text_vector,
+                    min(top_k, self.faiss_index_text.ntotal)
+                )
+                
+                for idx, distance in zip(indices[0], distances[0]):
+                    if idx < len(self.chunks):
+                        chunk_id = self.chunks[idx]['id']
+                        similarity = 1.0 / (1.0 + float(distance))
+                        text_results[chunk_id] = {
+                            'chunk': self.chunks[idx],
+                            'text_score': similarity
+                        }
             
-            # FAISS 검색
-            distances, indices = self.faiss_index.search(
-                query_vector,
-                min(top_k, self.faiss_index.ntotal)
-            )
+            # 2. 제목 쿼리 임베딩 및 검색
+            title_results = {}
+            if title_query and title_query.strip():
+                title_vector = self.embed_query(title_query, contract_id)
+                distances, indices = self.faiss_index_title.search(
+                    title_vector,
+                    min(top_k, self.faiss_index_title.ntotal)
+                )
+                
+                for idx, distance in zip(indices[0], distances[0]):
+                    if idx < len(self.chunks):
+                        chunk_id = self.chunks[idx]['id']
+                        similarity = 1.0 / (1.0 + float(distance))
+                        title_results[chunk_id] = {
+                            'chunk': self.chunks[idx],
+                            'title_score': similarity
+                        }
             
-            # 결과 구성
+            # 3. 결과 병합 및 가중합 계산
+            all_chunk_ids = set(text_results.keys()) | set(title_results.keys())
+            
+            if not all_chunk_ids:
+                logger.warning("Dense 검색 결과 없음 (제목/본문 모두)")
+                return []
+            
             results = []
-            for idx, distance in zip(indices[0], distances[0]):
-                if idx < len(self.chunks):
-                    chunk = self.chunks[idx]
-                    # L2 거리를 유사도로 변환
-                    similarity = 1.0 / (1.0 + float(distance))
-                    
-                    results.append({
-                        'chunk': chunk,
-                        'score': similarity,
-                        'source': 'dense'
-                    })
+            for chunk_id in all_chunk_ids:
+                text_score = text_results.get(chunk_id, {}).get('text_score', 0.0)
+                title_score = title_results.get(chunk_id, {}).get('title_score', 0.0)
+                
+                # 청크 정보 (text 또는 title 결과에서 가져오기)
+                chunk = text_results.get(chunk_id, title_results.get(chunk_id))['chunk']
+                
+                # 가중합 계산
+                weighted_score = self.text_weight * text_score + self.title_weight * title_score
+                
+                results.append({
+                    'chunk': chunk,
+                    'score': weighted_score,
+                    'text_score': text_score,
+                    'title_score': title_score,
+                    'source': 'dense'
+                })
             
-            return results
+            # 점수 순으로 정렬
+            results.sort(key=lambda x: x['score'], reverse=True)
+
+            # Top-K 선택
+            top_results = results[:top_k]
+
+            logger.info(f"✓ Faiss 검색 완료: {len(results)}개 (본문: {len(text_results)}, 제목: {len(title_results)})")
+
+            # Top-K 점수 범위 로깅
+            if top_results:
+                scores = [r['score'] for r in top_results]
+                logger.info(f"Dense top-k: {len(top_results)}개, 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
+
+            return top_results
             
         except Exception as e:
             logger.error(f"Dense 검색 실패: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return []
     
-    def sparse_search(self, query: str, top_k: int = 50) -> List[Dict[str, Any]]:
+    def sparse_search(
+        self,
+        text_query: str,
+        title_query: str,
+        top_k: int = 50
+    ) -> List[Dict[str, Any]]:
         """
-        Sparse 검색 (Whoosh BM25)
+        Sparse 검색 (Whoosh BM25) - 제목/본문 분리
 
         Args:
-            query: 검색 쿼리
+            text_query: 본문 검색 쿼리
+            title_query: 제목 검색 쿼리
             top_k: 반환할 결과 개수
 
         Returns:
-            검색 결과 리스트
+            검색 결과 리스트 (text_score, title_score 포함)
         """
         if self.whoosh_indexer is None:
             logger.error("Whoosh 인덱스가 로드되지 않았습니다")
             return []
 
         try:
-            # Whoosh BM25 검색
-            whoosh_results = self.whoosh_indexer.search(query, top_k=top_k)
+            # WhooshSearcher.search_with_field_weights() 호출
+            whoosh_results = self.whoosh_indexer.search_with_field_weights(
+                text_query=text_query,
+                title_query=title_query,
+                text_weight=self.text_weight,
+                title_weight=self.title_weight,
+                top_k=top_k
+            )
 
-            # 진단: 검색 결과 개수 및 점수 범위
             if not whoosh_results:
-                logger.warning(f"Sparse 검색 결과 없음 (쿼리 길이: {len(query)})")
-                logger.debug(f"  쿼리 미리보기: {query[:200]}...")
+                logger.warning(f"Sparse 검색 결과 없음")
                 return []
 
             scores = [hit['score'] for hit in whoosh_results]
-            logger.debug(f"Sparse 검색 완료: {len(whoosh_results)}개, 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
+            logger.info(f"Sparse top-k: {len(whoosh_results)}개, 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
 
             # 결과 변환
             results = []
@@ -195,6 +306,8 @@ class HybridSearcher:
                 results.append({
                     'chunk': chunk,
                     'score': hit['score'],
+                    'text_score': hit.get('text_score', 0.0),
+                    'title_score': hit.get('title_score', 0.0),
                     'source': 'sparse'
                 })
 
@@ -248,8 +361,8 @@ class HybridSearcher:
         - 이를 통해 0.85 상한 문제 해결
 
         Args:
-            dense_results: Dense 검색 결과
-            sparse_results: Sparse 검색 결과
+            dense_results: Dense 검색 결과 (text_score, title_score 포함)
+            sparse_results: Sparse 검색 결과 (text_score, title_score 포함)
 
         Returns:
             융합된 검색 결과 리스트
@@ -263,11 +376,15 @@ class HybridSearcher:
             effective_dense_weight = self.dense_weight
             effective_sparse_weight = self.sparse_weight
 
-        # 1. 점수 정규화
+        # 1. 원본 점수 맵 생성 (정규화 전)
+        dense_raw_scores = {r['chunk']['id']: r['score'] for r in dense_results}
+        sparse_raw_scores = {r['chunk']['id']: r['score'] for r in sparse_results}
+
+        # 2. 점수 정규화
         dense_normalized = self.normalize_scores(dense_results)
         sparse_normalized = self.normalize_scores(sparse_results)
 
-        # 2. 청크 ID별로 결과 수집
+        # 3. 청크 ID별로 결과 수집
         chunk_scores = {}
 
         # Dense 결과 추가
@@ -276,7 +393,11 @@ class HybridSearcher:
             chunk_scores[chunk_id] = {
                 'chunk': result['chunk'],
                 'dense_score': result['normalized_score'],
-                'sparse_score': 0.0
+                'dense_score_raw': dense_raw_scores.get(chunk_id, 0.0),  # 정규화 이전 원본 점수
+                'sparse_score': 0.0,
+                'sparse_score_raw': 0.0,
+                'text_score': result.get('text_score', 0.0),
+                'title_score': result.get('title_score', 0.0)
             }
 
         # Sparse 결과 추가/병합
@@ -285,18 +406,24 @@ class HybridSearcher:
             chunk_id = result['chunk']['id']
             if chunk_id in chunk_scores:
                 chunk_scores[chunk_id]['sparse_score'] = result['normalized_score']
+                chunk_scores[chunk_id]['sparse_score_raw'] = sparse_raw_scores.get(chunk_id, 0.0)  # 정규화 이전 원본 점수
                 sparse_contribution_count += 1
             else:
                 chunk_scores[chunk_id] = {
                     'chunk': result['chunk'],
                     'dense_score': 0.0,
-                    'sparse_score': result['normalized_score']
+                    'dense_score_raw': 0.0,
+                    'sparse_score': result['normalized_score'],
+                    'sparse_score_raw': sparse_raw_scores.get(chunk_id, 0.0),  # 정규화 이전 원본 점수
+                    'text_score': result.get('text_score', 0.0),
+                    'title_score': result.get('title_score', 0.0)
                 }
 
         # 진단: Sparse 기여도
         if sparse_results:
             overlap_rate = sparse_contribution_count / len(chunk_scores) * 100
-            logger.debug(f"Sparse-Dense 중복: {sparse_contribution_count}/{len(chunk_scores)} ({overlap_rate:.1f}%)")
+            logger.info(f"  Sparse-Dense 중복: {sparse_contribution_count}/{len(chunk_scores)} ({overlap_rate:.1f}%)")
+            logger.info(f"  가중치 - Dense: {effective_dense_weight:.2f}, Sparse: {effective_sparse_weight:.2f}")
 
         # 3. 가중합 계산 (Adaptive Weighting 적용)
         fused_results = []
@@ -310,7 +437,11 @@ class HybridSearcher:
                 'chunk': data['chunk'],
                 'score': final_score,
                 'dense_score': data['dense_score'],
+                'dense_score_raw': data['dense_score_raw'],  # 원본 점수 추가
                 'sparse_score': data['sparse_score'],
+                'sparse_score_raw': data['sparse_score_raw'],  # 원본 점수 추가
+                'text_score': data['text_score'],
+                'title_score': data['title_score'],
                 'parent_id': data['chunk'].get('parent_id'),
                 'title': data['chunk'].get('title')
             })
@@ -322,17 +453,19 @@ class HybridSearcher:
     
     def search(
         self,
-        query: str,
+        text_query: str,
+        title_query: str,
         top_k: int = 10,
         dense_top_k: int = 50,
         sparse_top_k: int = 50,
         contract_id: str = None
     ) -> List[Dict[str, Any]]:
         """
-        하이브리드 검색 수행
+        하이브리드 검색 수행 (제목/본문 분리)
 
         Args:
-            query: 검색 쿼리
+            text_query: 본문 검색 쿼리
+            title_query: 제목 검색 쿼리
             top_k: 최종 반환할 결과 개수
             dense_top_k: Dense 검색에서 가져올 결과 수
             sparse_top_k: Sparse 검색에서 가져올 결과 수
@@ -341,22 +474,34 @@ class HybridSearcher:
         Returns:
             검색 결과 리스트 (청크 레벨)
         """
-        if self.faiss_index is None or self.whoosh_indexer is None:
+        if self.faiss_index_text is None or self.faiss_index_title is None or self.whoosh_indexer is None:
             logger.error("인덱스가 로드되지 않았습니다")
             return []
 
         try:
-            logger.debug(f"하이브리드 검색: {query[:100]}...")
+            logger.debug(f"하이브리드 검색 (제목/본문 분리)")
+            logger.debug(f"  본문 쿼리: {text_query[:100]}...")
+            logger.debug(f"  제목 쿼리: {title_query[:100]}...")
+            logger.info(f"적용된 가중치 - 본문:제목 = {self.text_weight:.2f}:{self.title_weight:.2f}, Dense:Sparse = {self.dense_weight:.2f}:{self.sparse_weight:.2f}")
 
-            # 1. Dense 검색
-            dense_results = self.dense_search(query, top_k=dense_top_k, contract_id=contract_id)
+            # 1. Dense 검색 (제목/본문 분리)
+            dense_results = self.dense_search(
+                text_query=text_query,
+                title_query=title_query,
+                top_k=dense_top_k,
+                contract_id=contract_id
+            )
             logger.debug(f"  Dense: {len(dense_results)}개")
             
-            # 2. Sparse 검색
-            sparse_results = self.sparse_search(query, top_k=sparse_top_k)
+            # 2. Sparse 검색 (제목/본문 분리)
+            sparse_results = self.sparse_search(
+                text_query=text_query,
+                title_query=title_query,
+                top_k=sparse_top_k
+            )
             logger.debug(f"  Sparse: {len(sparse_results)}개")
             
-            # 3. Score Fusion
+            # 3. Score Fusion (기존 하이브리드 융합 로직 유지: 85:15)
             fused_results = self.fuse_scores(dense_results, sparse_results)
             logger.debug(f"  Fusion: {len(fused_results)}개")
             
@@ -370,6 +515,25 @@ class HybridSearcher:
             import traceback
             traceback.print_exc()
             return []
+
+    def set_field_weights(self, text_weight: float):
+        """
+        본문:제목 가중치 설정 (제목 가중치는 자동 계산)
+
+        Args:
+            text_weight: 본문 가중치 (0~1)
+
+        Raises:
+            ValueError: 가중치가 유효하지 않은 경우
+        """
+        # 범위 검증
+        if not (0.0 <= text_weight <= 1.0):
+            raise ValueError(f"본문 가중치는 0~1 사이여야 합니다: {text_weight}")
+        
+        self.text_weight = text_weight
+        self.title_weight = 1.0 - text_weight
+        
+        logger.info(f"필드 가중치 변경: 본문={self.text_weight:.2f}, 제목={self.title_weight:.2f}")
 
     def _log_token_usage(
         self,

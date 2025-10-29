@@ -59,7 +59,10 @@ class ArticleMatcher:
         user_article: Dict[str, Any],
         contract_type: str,
         top_k: int = 5,
-        contract_id: str = None
+        contract_id: str = None,
+        text_weight: float = 0.7,
+        title_weight: float = 0.3,
+        dense_weight: float = 0.85
     ) -> Dict[str, Any]:
         """
         대응 조항 검색 (멀티벡터 방식)
@@ -80,6 +83,10 @@ class ArticleMatcher:
             user_article: 사용자 조항 (content 배열 포함)
             contract_type: 계약 유형
             top_k: 청크 레벨 검색 결과 개수 (기본 5)
+            contract_id: 계약서 ID (토큰 로깅용)
+            text_weight: 본문 가중치 (기본값: 0.7)
+            title_weight: 제목 가중치 (기본값: 0.3)
+            dense_weight: 시멘틱 가중치 (기본값: 0.85)
 
         Returns:
             {
@@ -94,12 +101,15 @@ class ArticleMatcher:
 
         logger.info(f"조항 매칭 시작: 제{user_article_no}조 ({user_article_title})")
 
-        # 멀티벡터 검색
+        # 멀티벡터 검색 (가중치 전달)
         matched_articles, sub_item_results = self._search_with_sub_items(
             user_article,
             contract_type,
             top_k,
-            contract_id
+            contract_id,
+            text_weight=text_weight,
+            title_weight=title_weight,
+            dense_weight=dense_weight
         )
 
         if not matched_articles:
@@ -127,16 +137,23 @@ class ArticleMatcher:
         self,
         user_article: Dict[str, Any],
         contract_type: str,
-        top_k: int = 5,
-        contract_id: str = None
+        top_k: int = 1,
+        contract_id: str = None,
+        text_weight: float = 0.7,
+        title_weight: float = 0.3,
+        dense_weight: float = 0.85
     ) -> tuple[List[Dict], List[Dict]]:
         """
-        사용자 조항의 각 하위항목으로 검색
+        사용자 조항의 각 하위항목으로 검색 (top-1 방식)
         
         각 하위항목별로:
-        1. top_k 청크 검색
-        2. 조별로 평균 점수 계산
-        3. 최고 점수 조 1개 선정
+        1. top-1 청크 검색 (제목/본문 분리)
+        2. 최고 점수 조 1개 선정
+        
+        Args:
+            text_weight: 본문 가중치 (기본값: 0.7)
+            title_weight: 제목 가중치 (기본값: 0.3)
+            dense_weight: 시멘틱 가중치 (기본값: 0.85)
         
         Returns:
             (article_scores, sub_item_results)
@@ -160,18 +177,27 @@ class ArticleMatcher:
             if not normalized:
                 continue
             
-            # 검색 쿼리 생성
-            query = self._build_search_query(normalized, article_title)
+            # 검색 쿼리 생성 (제목/본문 분리)
+            text_query, title_query = self._build_search_queries(normalized, article_title)
             
-            logger.debug(f"    하위항목 {idx} 검색: {query[:100]}...")
+            logger.debug(f"    하위항목 {idx} 검색: text={text_query[:50]}..., title={title_query}")
 
-            # 하이브리드 검색 수행 (top_k 청크)
-            chunk_results = self._hybrid_search(query, contract_type, top_k, contract_id)
+            # 하이브리드 검색 수행 (top-1 청크, 가중치 전달)
+            chunk_results = self._hybrid_search(
+                text_query=text_query,
+                title_query=title_query,
+                contract_type=contract_type,
+                top_k=top_k,
+                contract_id=contract_id,
+                text_weight=text_weight,
+                title_weight=title_weight,
+                dense_weight=dense_weight
+            )
             
             if not chunk_results:
                 continue
             
-            # 이 하위항목의 top_k 결과에서 조별 평균 점수 계산
+            # top-1 결과에서 최고 점수 조 선정
             best_article = self._select_best_article_from_chunks(chunk_results)
             
             if best_article:
@@ -227,7 +253,7 @@ class ArticleMatcher:
         article_title: str
     ) -> str:
         """
-        검색 쿼리 생성
+        검색 쿼리 생성 (레거시 메서드 - 하위 호환성 유지)
         
         하위항목 전체 내용 + 조 제목 (제목은 뒤에 배치하여 가중치 과다 방지)
         
@@ -240,6 +266,25 @@ class ArticleMatcher:
         """
         # 하위항목 전체 내용 사용 (제목은 뒤에 배치)
         return f"{sub_item} {article_title}"
+    
+    def _build_search_queries(
+        self,
+        sub_item: str,
+        article_title: str
+    ) -> tuple[str, str]:
+        """
+        검색 쿼리 생성 (제목/본문 분리)
+        
+        Args:
+            sub_item: 정규화된 하위항목 내용 (본문)
+            article_title: 조 제목
+            
+        Returns:
+            (text_query, title_query) 튜플
+            - text_query: 본문 쿼리 (sub_item)
+            - title_query: 제목 쿼리 (article_title)
+        """
+        return (sub_item, article_title)
     
     def _get_or_create_searcher(self, contract_type: str):
         """
@@ -263,31 +308,63 @@ class ArticleMatcher:
             dense_weight=0.85
         )
         
-        # 인덱스 로드
-        faiss_index = self.kb_loader.load_faiss_index(contract_type)
-        chunks = self.kb_loader.load_chunks(contract_type)
-        whoosh_indexer = self.kb_loader.load_whoosh_index(contract_type)
-        
-        if not faiss_index or not chunks or not whoosh_indexer:
-            logger.error(f"인덱스 로드 실패: {contract_type}")
+        try:
+            # 두 개의 FAISS 인덱스 로드
+            faiss_indexes = self.kb_loader.load_faiss_indexes(contract_type)
+            chunks = self.kb_loader.load_chunks(contract_type)
+            whoosh_indexer = self.kb_loader.load_whoosh_index(contract_type)
+            
+            if not faiss_indexes:
+                logger.error(f"FAISS 인덱스 로드 실패: {contract_type}")
+                return None
+            
+            if not chunks:
+                logger.error(f"청크 데이터 로드 실패: {contract_type}")
+                return None
+            
+            if not whoosh_indexer:
+                logger.error(f"Whoosh 인덱스 로드 실패: {contract_type}")
+                return None
+            
+            # 두 개의 인덱스 언팩
+            faiss_index_text, faiss_index_title = faiss_indexes
+            
+            # HybridSearcher에 두 개의 인덱스 전달
+            searcher.load_indexes(faiss_index_text, faiss_index_title, chunks, whoosh_indexer)
+            
+            # 캐싱
+            self.searchers[contract_type] = searcher
+            
+            logger.info(f"HybridSearcher 생성 완료: {contract_type}")
+            return searcher
+            
+        except Exception as e:
+            logger.error(f"HybridSearcher 생성 실패: {contract_type}, 에러: {e}")
             return None
-        
-        searcher.load_indexes(faiss_index, chunks, whoosh_indexer)
-        
-        # 캐싱
-        self.searchers[contract_type] = searcher
-        
-        return searcher
     
     def _hybrid_search(
         self,
-        query: str,
+        text_query: str,
+        title_query: str,
         contract_type: str,
         top_k: int,
-        contract_id: str = None
+        contract_id: str = None,
+        text_weight: float = 0.7,
+        title_weight: float = 0.3,
+        dense_weight: float = 0.85
     ) -> List[Dict]:
         """
-        하이브리드 검색 수행 (FAISS + Whoosh)
+        하이브리드 검색 수행 (FAISS + Whoosh, 제목/본문 분리)
+
+        Args:
+            text_query: 본문 쿼리
+            title_query: 제목 쿼리
+            contract_type: 계약 유형
+            top_k: 검색 결과 개수
+            contract_id: 계약 ID (선택)
+            text_weight: 본문 가중치 (기본값: 0.7)
+            title_weight: 제목 가중치 (기본값: 0.3)
+            dense_weight: 시멘틱 가중치 (기본값: 0.85)
 
         Returns:
             검색 결과 청크 리스트
@@ -298,8 +375,17 @@ class ArticleMatcher:
             logger.error(f"Searcher를 생성할 수 없습니다: {contract_type}")
             return []
 
-        # 하이브리드 검색 수행
-        results = searcher.search(query, top_k=top_k, contract_id=contract_id)
+        # 가중치 설정 (본문:제목, Dense:Sparse)
+        searcher.set_field_weights(text_weight)  # title_weight는 자동 계산 (1.0 - text_weight)
+        searcher.dense_weight = dense_weight  # sparse_weight는 자동 계산 (1.0 - dense_weight)
+
+        # 하이브리드 검색 수행 (제목/본문 분리)
+        results = searcher.search(
+            text_query=text_query,
+            title_query=title_query,
+            top_k=top_k,
+            contract_id=contract_id
+        )
 
         return results
     
@@ -308,18 +394,18 @@ class ArticleMatcher:
         chunk_results: List[Dict]
     ) -> Optional[Dict]:
         """
-        청크 검색 결과에서 최고 점수 조 1개 선정
+        청크 검색 결과에서 최고 점수 조 1개 선정 (top-1 방식)
         
-        각 조별로 평균 점수를 계산하고 최고 점수 조 반환
+        각 조의 최고 점수 청크를 대표 점수로 사용
         
         Args:
-            chunk_results: 하이브리드 검색 결과 (top_k 청크)
+            chunk_results: 하이브리드 검색 결과 (top-1 청크)
             
         Returns:
             {
                 'parent_id': str,
                 'title': str,
-                'score': float,  # 조 평균 점수
+                'score': float,  # 조의 최고 점수
                 'chunks': List[Dict]  # 해당 조의 청크들
             }
         """
@@ -336,12 +422,12 @@ class ArticleMatcher:
         if not article_groups:
             return None
         
-        # 조별 평균 점수 계산
+        # 조별 최고 점수 계산
         article_scores = []
         
         for parent_id, chunks in article_groups.items():
-            # 평균 점수
-            avg_score = sum(c.get('score', 0.0) for c in chunks) / len(chunks)
+            # 최고 점수 (top-1 방식)
+            max_score = max(c.get('score', 0.0) for c in chunks)
             
             # 제목 추출
             title = chunks[0].get('title', '') if chunks else ''
@@ -349,7 +435,7 @@ class ArticleMatcher:
             article_scores.append({
                 'parent_id': parent_id,
                 'title': title,
-                'score': avg_score,
+                'score': max_score,
                 'chunks': chunks
             })
         
@@ -427,7 +513,14 @@ class ArticleMatcher:
 
         logger.debug(f"    조 단위 집계 완료: {len(article_scores)}개 조")
         for i, article in enumerate(article_scores, 1):
-            logger.debug(f"      {i}. {article['parent_id']}: {article['score']:.3f} (하위항목: {article['num_sub_items']}개)")
+            # Dense/Sparse 평균 점수 계산
+            chunks = article['matched_chunks']
+            if chunks:
+                avg_dense = sum(c.get('dense_score', 0.0) for c in chunks) / len(chunks)
+                avg_sparse = sum(c.get('sparse_score', 0.0) for c in chunks) / len(chunks)
+                logger.info(f"      {i}. {article['parent_id']}: {article['score']:.3f} (D:{avg_dense:.3f}, S:{avg_sparse:.3f}, 하위항목:{article['num_sub_items']})")
+            else:
+                logger.debug(f"      {i}. {article['parent_id']}: {article['score']:.3f} (하위항목: {article['num_sub_items']}개)")
 
         return article_scores
 
