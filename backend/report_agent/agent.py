@@ -45,15 +45,10 @@ def generate_report(contract_id: str, verification_result_dict: dict):
         text_report_path = generator.generate_text_report(result)
         logger.info(f"텍스트 보고서 생성 완료: {text_report_path}")
         
-        # PDF 보고서 생성
-        pdf_report_path = generator.generate_pdf_report(result)
-        logger.info(f"PDF 보고서 생성 완료: {pdf_report_path}")
-        
         return {
             "status": "success",
             "contract_id": contract_id,
-            "text_report": text_report_path,
-            "pdf_report": pdf_report_path
+            "text_report": text_report_path
         }
         
     except Exception as e:
