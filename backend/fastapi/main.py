@@ -324,12 +324,21 @@ async def confirm_classification(
 
 
 @app.post("/api/validation/{contract_id}/start")
-async def start_validation(contract_id: str, db: Session = Depends(get_db)):
+async def start_validation(
+    contract_id: str,
+    text_weight: float = 0.7,
+    title_weight: float = 0.3,
+    dense_weight: float = 0.85,
+    db: Session = Depends(get_db)
+):
     """
     계약서 검증 시작 (A3 노드)
     
     Args:
         contract_id: 계약서 ID
+        text_weight: 본문 가중치 (기본값: 0.7)
+        title_weight: 제목 가중치 (기본값: 0.3)
+        dense_weight: 시멘틱 가중치 (기본값: 0.85)
         db: 데이터베이스 세션
         
     Returns:
@@ -341,6 +350,16 @@ async def start_validation(contract_id: str, db: Session = Depends(get_db)):
         }
     """
     try:
+        # 가중치 검증
+        if not (0.0 <= text_weight <= 1.0):
+            raise HTTPException(status_code=400, detail="본문 가중치는 0~1 사이여야 합니다")
+        if not (0.0 <= title_weight <= 1.0):
+            raise HTTPException(status_code=400, detail="제목 가중치는 0~1 사이여야 합니다")
+        if not (0.0 <= dense_weight <= 1.0):
+            raise HTTPException(status_code=400, detail="시멘틱 가중치는 0~1 사이여야 합니다")
+        if abs(text_weight + title_weight - 1.0) > 0.001:
+            raise HTTPException(status_code=400, detail="본문 가중치와 제목 가중치의 합은 1.0이어야 합니다")
+        
         # 계약서 존재 확인
         contract = db.query(ContractDocument).filter(
             ContractDocument.contract_id == contract_id
@@ -357,10 +376,15 @@ async def start_validation(contract_id: str, db: Session = Depends(get_db)):
         if not classification:
             raise HTTPException(status_code=400, detail="계약서 분류가 완료되지 않았습니다")
         
-        # 검증 작업 큐에 전송
-        task = validate_contract_task.delay(contract_id)
+        # 검증 작업 큐에 전송 (가중치 파라미터 전달)
+        task = validate_contract_task.delay(
+            contract_id,
+            text_weight=text_weight,
+            title_weight=title_weight,
+            dense_weight=dense_weight
+        )
         
-        logger.info(f"검증 작업 시작: {contract_id}, task_id: {task.id}")
+        logger.info(f"검증 작업 시작: {contract_id}, task_id: {task.id}, weights: text={text_weight}, title={title_weight}, dense={dense_weight}")
         
         return {
             "message": "검증이 시작되었습니다",
