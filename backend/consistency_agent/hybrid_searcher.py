@@ -10,7 +10,7 @@ from collections import defaultdict
 from openai import AzureOpenAI
 from backend.shared.database import SessionLocal, TokenUsage
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 
 class HybridSearcher:
@@ -124,15 +124,26 @@ class HybridSearcher:
             )
 
             # 토큰 사용량 로깅
-            if hasattr(response, 'usage') and response.usage and contract_id:
-                self._log_token_usage(
-                    contract_id=contract_id,
-                    api_type="embedding",
-                    model=self.embedding_model,
-                    prompt_tokens=response.usage.prompt_tokens,
-                    completion_tokens=0,
-                    total_tokens=response.usage.total_tokens,
-                    extra_info={"purpose": "article_matching_query"}
+            usage = getattr(response, "usage", None)
+            if usage:
+                if contract_id:
+                    self._log_token_usage(
+                        contract_id=contract_id,
+                        api_type="embedding",
+                        model=self.embedding_model,
+                        prompt_tokens=usage.prompt_tokens,
+                        completion_tokens=0,
+                        total_tokens=usage.total_tokens,
+                        extra_info={"purpose": "article_matching_query"}
+                    )
+                preview = query[:50].replace("\n", " ").strip()
+                logger.info(
+                    "Embedding 생성 완료 (contract=%s, prompt_tokens=%d, total_tokens=%d, query=\"%s%s\")",
+                    contract_id or "N/A",
+                    usage.prompt_tokens,
+                    usage.total_tokens,
+                    preview,
+                    "..." if len(query) > 50 else ""
                 )
 
             embedding = response.data[0].embedding
@@ -150,31 +161,52 @@ class HybridSearcher:
         contract_id: str = None
     ) -> List[Dict[str, Any]]:
         """
-        Dense 검색 (FAISS 벡터 유사도) - 제목/본문 분리
+        Dense 검사(FAISS 벡터 유사도 - 제목/본문 분리
 
         Args:
-            text_query: 본문 검색 쿼리
-            title_query: 제목 검색 쿼리
+            text_query: 본문 검색쿼리
+            title_query: 제목 검색쿼리
             top_k: 반환할 결과 개수
-            contract_id: 계약서 ID (토큰 로깅용)
+            contract_id: 계약ID (토큰 로깅)
 
         Returns:
-            검색 결과 리스트 (text_score, title_score 포함)
+            검색결과 리스트(text_score, title_score 포함)
         """
+        return self._dense_search_internal(
+            text_query=text_query,
+            title_query=title_query,
+            top_k=top_k,
+            contract_id=contract_id,
+        )
+
+    def _dense_search_internal(
+        self,
+        text_query: str,
+        title_query: str,
+        top_k: int,
+        contract_id: str = None,
+        text_embedding=None,
+        title_embedding=None,
+    ) -> List[Dict[str, Any]]:
         if self.faiss_index_text is None or self.faiss_index_title is None or self.chunks is None:
             logger.error("FAISS 인덱스가 로드되지 않았습니다")
             return []
 
         try:
-            # 1. 본문 쿼리 임베딩 및 검색
             text_results = {}
-            if text_query and text_query.strip():
+            if text_embedding is not None:
+                text_vector = self._ensure_vector(text_embedding)
+            elif text_query and str(text_query).strip():
                 text_vector = self.embed_query(text_query, contract_id)
+            else:
+                text_vector = None
+
+            if text_vector is not None:
                 distances, indices = self.faiss_index_text.search(
                     text_vector,
                     min(top_k, self.faiss_index_text.ntotal)
                 )
-                
+
                 for idx, distance in zip(indices[0], distances[0]):
                     if idx < len(self.chunks):
                         chunk_id = self.chunks[idx]['id']
@@ -183,16 +215,21 @@ class HybridSearcher:
                             'chunk': self.chunks[idx],
                             'text_score': similarity
                         }
-            
-            # 2. 제목 쿼리 임베딩 및 검색
+
             title_results = {}
-            if title_query and title_query.strip():
+            if title_embedding is not None:
+                title_vector = self._ensure_vector(title_embedding)
+            elif title_query and str(title_query).strip():
                 title_vector = self.embed_query(title_query, contract_id)
+            else:
+                title_vector = None
+
+            if title_vector is not None:
                 distances, indices = self.faiss_index_title.search(
                     title_vector,
                     min(top_k, self.faiss_index_title.ntotal)
                 )
-                
+
                 for idx, distance in zip(indices[0], distances[0]):
                     if idx < len(self.chunks):
                         chunk_id = self.chunks[idx]['id']
@@ -201,25 +238,21 @@ class HybridSearcher:
                             'chunk': self.chunks[idx],
                             'title_score': similarity
                         }
-            
-            # 3. 결과 병합 및 가중합 계산
+
             all_chunk_ids = set(text_results.keys()) | set(title_results.keys())
-            
+
             if not all_chunk_ids:
-                logger.warning("Dense 검색 결과 없음 (제목/본문 모두)")
+                logger.warning("Dense 검색결과 없음 (제목/본문 모두)")
                 return []
-            
+
             results = []
             for chunk_id in all_chunk_ids:
                 text_score = text_results.get(chunk_id, {}).get('text_score', 0.0)
                 title_score = title_results.get(chunk_id, {}).get('title_score', 0.0)
-                
-                # 청크 정보 (text 또는 title 결과에서 가져오기)
+
                 chunk = text_results.get(chunk_id, title_results.get(chunk_id))['chunk']
-                
-                # 가중합 계산
                 weighted_score = self.text_weight * text_score + self.title_weight * title_score
-                
+
                 results.append({
                     'chunk': chunk,
                     'score': weighted_score,
@@ -227,28 +260,24 @@ class HybridSearcher:
                     'title_score': title_score,
                     'source': 'dense'
                 })
-            
-            # 점수 순으로 정렬
-            results.sort(key=lambda x: x['score'], reverse=True)
 
-            # Top-K 선택
+            results.sort(key=lambda x: x['score'], reverse=True)
             top_results = results[:top_k]
 
-            logger.info(f"✓ Faiss 검색 완료: {len(results)}개 (본문: {len(text_results)}, 제목: {len(title_results)})")
+            logger.info(f"✓ Faiss 검색완료: {len(results)}건(본문: {len(text_results)}, 제목: {len(title_results)})")
 
-            # Top-K 점수 범위 로깅
             if top_results:
                 scores = [r['score'] for r in top_results]
-                logger.info(f"Dense top-k: {len(top_results)}개, 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
+                logger.info(f"Dense top-k: {len(top_results)}건 점수 범위 [{min(scores):.4f} ~ {max(scores):.4f}]")
 
             return top_results
-            
+
         except Exception as e:
             logger.error(f"Dense 검색 실패: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return []
-    
+
     def sparse_search(
         self,
         text_query: str,
@@ -461,55 +490,86 @@ class HybridSearcher:
         contract_id: str = None
     ) -> List[Dict[str, Any]]:
         """
-        하이브리드 검색 수행 (제목/본문 분리)
-
-        Args:
-            text_query: 본문 검색 쿼리
-            title_query: 제목 검색 쿼리
-            top_k: 최종 반환할 결과 개수
-            dense_top_k: Dense 검색에서 가져올 결과 수
-            sparse_top_k: Sparse 검색에서 가져올 결과 수
-            contract_id: 계약서 ID (토큰 로깅용)
-
-        Returns:
-            검색 결과 리스트 (청크 레벨)
+        하이브리드 검색을 수행 (제목/본문 분리)
         """
+        return self._search_internal(
+            text_query=text_query,
+            title_query=title_query,
+            top_k=top_k,
+            dense_top_k=dense_top_k,
+            sparse_top_k=sparse_top_k,
+            contract_id=contract_id,
+        )
+
+    def search_with_embeddings(
+        self,
+        text_query: str,
+        title_query: str,
+        text_embedding,
+        title_embedding,
+        top_k: int = 10,
+        dense_top_k: int = 50,
+        sparse_top_k: int = 50,
+        contract_id: str = None
+    ) -> List[Dict[str, Any]]:
+        """
+        하이브리드 검색 (사전 계산된 임베딩 사용)
+        """
+        return self._search_internal(
+            text_query=text_query,
+            title_query=title_query,
+            top_k=top_k,
+            dense_top_k=dense_top_k,
+            sparse_top_k=sparse_top_k,
+            contract_id=contract_id,
+            text_embedding=text_embedding,
+            title_embedding=title_embedding,
+        )
+
+    def _search_internal(
+        self,
+        text_query: str,
+        title_query: str,
+        top_k: int,
+        dense_top_k: int,
+        sparse_top_k: int,
+        contract_id: str = None,
+        text_embedding=None,
+        title_embedding=None,
+    ) -> List[Dict[str, Any]]:
         if self.faiss_index_text is None or self.faiss_index_title is None or self.whoosh_indexer is None:
-            logger.error("인덱스가 로드되지 않았습니다")
+            logger.error("검색 인덱스가 로드되지 않았습니다")
             return []
 
         try:
-            logger.debug(f"하이브리드 검색 (제목/본문 분리)")
+            logger.debug("하이브리드 검색(제목/본문 분리)")
             logger.debug(f"  본문 쿼리: {text_query[:100]}...")
             logger.debug(f"  제목 쿼리: {title_query[:100]}...")
-            logger.info(f"적용된 가중치 - 본문:제목 = {self.text_weight:.2f}:{self.title_weight:.2f}, Dense:Sparse = {self.dense_weight:.2f}:{self.sparse_weight:.2f}")
+            logger.info(f"가중치 - 본문:제목 = {self.text_weight:.2f}:{self.title_weight:.2f}, Dense:Sparse = {self.dense_weight:.2f}:{self.sparse_weight:.2f}")
 
-            # 1. Dense 검색 (제목/본문 분리)
-            dense_results = self.dense_search(
+            dense_results = self._dense_search_internal(
                 text_query=text_query,
                 title_query=title_query,
                 top_k=dense_top_k,
-                contract_id=contract_id
+                contract_id=contract_id,
+                text_embedding=text_embedding,
+                title_embedding=title_embedding,
             )
-            logger.debug(f"  Dense: {len(dense_results)}개")
-            
-            # 2. Sparse 검색 (제목/본문 분리)
+            logger.debug(f"  Dense: {len(dense_results)}건")
+
             sparse_results = self.sparse_search(
                 text_query=text_query,
                 title_query=title_query,
                 top_k=sparse_top_k
             )
-            logger.debug(f"  Sparse: {len(sparse_results)}개")
-            
-            # 3. Score Fusion (기존 하이브리드 융합 로직 유지: 85:15)
+            logger.debug(f"  Sparse: {len(sparse_results)}건")
+
             fused_results = self.fuse_scores(dense_results, sparse_results)
-            logger.debug(f"  Fusion: {len(fused_results)}개")
-            
-            # 4. Top-K 선택
+            logger.debug(f"  Fusion: {len(fused_results)}건")
+
             final_results = fused_results[:top_k]
-            
             return final_results
-            
+
         except Exception as e:
             logger.error(f"하이브리드 검색 실패: {e}")
             import traceback
@@ -534,6 +594,21 @@ class HybridSearcher:
         self.title_weight = 1.0 - text_weight
         
         logger.info(f"필드 가중치 변경: 본문={self.text_weight:.2f}, 제목={self.title_weight:.2f}")
+
+    @staticmethod
+    def _ensure_vector(vector) -> np.ndarray:
+        """Ensure the embedding vector is a 2D numpy array."""
+        if isinstance(vector, np.ndarray):
+            arr = vector.astype(np.float32, copy=False)
+        else:
+            arr = np.array(vector, dtype=np.float32)
+
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        elif arr.ndim != 2:
+            raise ValueError("Embedding vector must be 1D or 2D.")
+
+        return arr
 
     def _log_token_usage(
         self,

@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from backend.shared.database import SessionLocal, ContractDocument, ValidationResult, init_db
 from backend.shared.services.knowledge_base_loader import KnowledgeBaseLoader
-from backend.consistency_agent.nodes.a3_node import ContentAnalysisNode
-from backend.consistency_agent.nodes.article_matcher import ArticleMatcher
+from backend.consistency_agent.a3_node.a3_node import ContentAnalysisNode
+from backend.consistency_agent.a3_node.article_matcher import ArticleMatcher
 from backend.consistency_agent.hybrid_searcher import HybridSearcher
 
 
@@ -215,7 +215,7 @@ class TestConsistencyAgentIntegration:
             pytest.skip("Azure OpenAI 환경 변수 없음")
 
         from openai import AzureOpenAI
-        from backend.consistency_agent.nodes.content_comparator import ContentComparator
+        from backend.consistency_agent.a3_node.content_comparator import ContentComparator
 
         azure_client = AzureOpenAI(
             api_key=os.getenv('AZURE_OPENAI_API_KEY'),

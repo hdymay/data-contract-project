@@ -3,7 +3,12 @@
     "allow": [
       "Bash(python3:*)",
       "Bash(docker exec:*)",
-      "Bash(docker run:*)"
+      "Bash(docker run:*)",
+      "Read(//c/Python Projects/data-contract-a1/**)",
+      "Bash(git ls-tree:*)",
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Read(//c//**)"
     ],
     "deny": [],
     "ask": []

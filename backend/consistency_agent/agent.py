@@ -2,7 +2,7 @@ from celery import Celery
 from backend.shared.core.celery_app import celery_app
 from backend.shared.database import get_db, ValidationResult, ContractDocument, ClassificationResult
 from backend.shared.services.knowledge_base_loader import KnowledgeBaseLoader
-from .nodes.a3_node import ContentAnalysisNode
+from .a3_node.a3_node import ContentAnalysisNode
 import logging
 import os
 from openai import AzureOpenAI

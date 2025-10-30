@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from openai import AzureOpenAI
 from backend.shared.services.knowledge_base_loader import KnowledgeBaseLoader
 from backend.consistency_agent.hybrid_searcher import HybridSearcher
-from backend.consistency_agent.nodes.article_matcher import ArticleMatcher
+from backend.consistency_agent.a3_node.article_matcher import ArticleMatcher
 
 
 def debug_search_scores():

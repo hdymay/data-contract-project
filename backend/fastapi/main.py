@@ -135,8 +135,28 @@ async def upload_file(file: UploadFile = File(...), db: Session = Depends(get_db
         )
         db.add(contract_doc)
         db.commit()
-        
-        logger.info(f"계약서 저장 완료: {contract_id}")
+        db.refresh(contract_doc)
+
+        # 임베딩 생성 및 저장
+        try:
+            from backend.shared.services.embedding_generator import EmbeddingGenerator
+
+            generator = EmbeddingGenerator()
+            embeddings = generator.generate_embeddings(
+                contract_id=contract_id,
+                parsed_data=contract_doc.parsed_data
+            )
+
+            updated_parsed = dict(contract_doc.parsed_data or {})
+            updated_parsed["embeddings"] = embeddings
+            contract_doc.parsed_data = updated_parsed
+            db.commit()
+
+            logger.info(f"Embedding generation completed: {contract_id}")
+        except Exception as embed_err:
+            logger.error(f"Embedding generation failed: {contract_id}, {embed_err}")
+
+        logger.info(f"Contract saved: {contract_id}")
 
         # 임시 파일 삭제
         try:

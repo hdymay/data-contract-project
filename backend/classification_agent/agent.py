@@ -6,10 +6,11 @@ Classification Agent
 import logging
 import os
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from openai import AzureOpenAI
 from backend.shared.core.celery_app import celery_app
 from backend.shared.database import SessionLocal, ContractDocument, ClassificationResult, TokenUsage
+from backend.shared.services.embedding_loader import EmbeddingLoader
 
 logger = logging.getLogger(__name__)
 
@@ -62,13 +63,16 @@ class ClassificationAgent:
             azure_endpoint=self.azure_endpoint
         )
 
+        self.embedding_loader = EmbeddingLoader()
+
         logger.info("ClassificationAgent 초기화 완료")
 
     def classify(
         self,
         contract_id: str,
         parsed_data: Dict[str, Any],
-        knowledge_base_loader
+        knowledge_base_loader,
+        filename: str = None
     ) -> Dict[str, Any]:
         """
         사용자 계약서 분류
@@ -77,6 +81,7 @@ class ClassificationAgent:
             contract_id: 계약서 ID
             parsed_data: 파싱된 계약서 데이터
             knowledge_base_loader: 지식베이스 로더 인스턴스
+            filename: 계약서 파일명 (분류 참고용)
 
         Returns:
             {
@@ -97,14 +102,16 @@ class ClassificationAgent:
             similarity_scores = self._calculate_similarity_scores(
                 key_articles,
                 knowledge_base_loader,
-                contract_id
+                contract_id,
+                parsed_data
             )
 
             # 3. LLM으로 최종 분류
             predicted_type, confidence, reasoning = self._llm_classify(
                 key_articles,
                 similarity_scores,
-                contract_id
+                contract_id,
+                filename
             )
 
             result = {
@@ -155,59 +162,157 @@ class ClassificationAgent:
         self,
         key_articles: List[Dict[str, str]],
         knowledge_base_loader,
-        contract_id: str = None
+        contract_id: str = None,
+        parsed_data: Optional[Dict[str, Any]] = None
     ) -> Dict[str, float]:
-        """
-        5종 표준계약서와 유사도 계산
+        """Calculate similarity scores against standard contract types."""
+        scores: Dict[str, float] = {}
 
-        Args:
-            key_articles: 주요 조항 리스트
-            knowledge_base_loader: 지식베이스 로더
+        query_embedding = self._build_query_embedding(
+            key_articles=key_articles,
+            parsed_data=parsed_data,
+            contract_id=contract_id
+        )
 
-        Returns:
-            유형별 유사도 점수
-        """
-        scores = {}
+        if query_embedding is None:
+            logger.warning("Failed to build query embedding; returning zero scores.")
+            return {contract_type: 0.0 for contract_type in self.CONTRACT_TYPES.keys()}
 
-        # 주요 조항 전체를 하나의 쿼리로 결합
-        query_text = " ".join([art["full_text"] for art in key_articles])
-        query_embedding = self._get_embedding(query_text, contract_id)
-
-        # 각 유형별로 유사도 계산
         for contract_type in self.CONTRACT_TYPES.keys():
             try:
-                # 지식베이스에서 해당 유형의 청크 로드
                 chunks = knowledge_base_loader.load_chunks(contract_type)
 
                 if not chunks:
-                    logger.warning(f"청크가 없음: {contract_type}")
+                    logger.warning(f"No chunks available: {contract_type}")
                     scores[contract_type] = 0.0
                     continue
 
-                # 상위 N개 청크와 유사도 계산
                 similarities = []
-                for chunk in chunks[:20]:  # 상위 20개만 비교
+                for chunk in chunks[:20]:
                     chunk_embedding = chunk.get("embedding")
                     if chunk_embedding:
                         sim = self._cosine_similarity(query_embedding, chunk_embedding)
                         similarities.append(sim)
 
-                # 평균 유사도
                 avg_similarity = sum(similarities) / len(similarities) if similarities else 0.0
                 scores[contract_type] = avg_similarity
 
             except Exception as e:
-                logger.error(f"유사도 계산 실패: {contract_type} - {e}")
+                logger.error(f"Similarity calculation failed: {contract_type} - {e}")
                 scores[contract_type] = 0.0
 
-        logger.debug(f"유사도 점수: {scores}")
+        logger.debug(f"Similarity scores: {scores}")
         return scores
+
+    def _build_query_embedding(
+        self,
+        key_articles: List[Dict[str, str]],
+        parsed_data: Optional[Dict[str, Any]],
+        contract_id: Optional[str],
+    ) -> Optional[List[float]]:
+        stored_embeddings = self._get_stored_embeddings(contract_id, parsed_data)
+
+        if stored_embeddings:
+            combined = self._combine_article_embeddings(stored_embeddings, key_articles)
+            if combined:
+                return combined
+            logger.warning("Stored embeddings incomplete for key articles; falling back to live embedding.")
+
+        query_text = " ".join([art.get("full_text", "") for art in key_articles])
+        normalized = " ".join(query_text.split())
+        if not normalized:
+            return None
+
+        return self._get_embedding(normalized, contract_id)
+
+    def _get_stored_embeddings(
+        self,
+        contract_id: Optional[str],
+        parsed_data: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if isinstance(parsed_data, dict):
+            embeddings = parsed_data.get("embeddings")
+            if embeddings:
+                return embeddings
+
+        if contract_id:
+            try:
+                return self.embedding_loader.load_embeddings(contract_id)
+            except Exception as exc:
+                logger.error(f"Failed to load persisted embeddings: {exc}")
+        return None
+
+    def _combine_article_embeddings(
+        self,
+        embeddings_payload: Dict[str, Any],
+        key_articles: List[Dict[str, str]],
+    ) -> Optional[List[float]]:
+        article_entries = embeddings_payload.get("article_embeddings")
+        if not article_entries:
+            return None
+
+        article_map = {
+            entry.get("article_no"): entry
+            for entry in article_entries
+            if entry.get("article_no") is not None
+        }
+
+        aggregated_vectors: List[List[float]] = []
+
+        for article in key_articles:
+            article_no = self._safe_int(article.get("number"))
+            if article_no is None:
+                continue
+
+            entry = article_map.get(article_no)
+            if not entry:
+                continue
+
+            vectors: List[List[float]] = []
+            title_vec = entry.get("title_embedding")
+            if title_vec:
+                vectors.append(title_vec)
+
+            for sub_item in entry.get("sub_items", []):
+                vec = sub_item.get("text_embedding")
+                if vec:
+                    vectors.append(vec)
+
+            if vectors:
+                article_vector = self._average_vectors(vectors)
+                if article_vector:
+                    aggregated_vectors.append(article_vector)
+
+        if not aggregated_vectors:
+            return None
+
+        return self._average_vectors(aggregated_vectors)
+
+    @staticmethod
+    def _average_vectors(vectors: List[List[float]]) -> Optional[List[float]]:
+        if not vectors:
+            return None
+        import numpy as np
+
+        array = np.array(vectors, dtype=float)
+        if array.size == 0:
+            return None
+        mean_vector = array.mean(axis=0)
+        return mean_vector.tolist()
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _llm_classify(
         self,
         key_articles: List[Dict[str, str]],
         similarity_scores: Dict[str, float],
-        contract_id: str = None
+        contract_id: str = None,
+        filename: str = None
     ) -> Tuple[str, float, str]:
         """
         LLM으로 최종 분류
@@ -215,6 +320,7 @@ class ClassificationAgent:
         Args:
             key_articles: 주요 조항
             similarity_scores: 유사도 점수
+            filename: 계약서 파일명 (분류 참고용)
 
         Returns:
             (predicted_type, confidence, reasoning)
@@ -230,7 +336,10 @@ class ClassificationAgent:
             for t, score in sorted(similarity_scores.items(), key=lambda x: x[1], reverse=True)
         ])
 
-        prompt = f"""다음은 사용자가 업로드한 계약서의 주요 조항입니다:
+        # 파일명 정보 추가
+        filename_info = f"\n업로드된 파일명: {filename}\n" if filename else ""
+
+        prompt = f"""다음은 사용자가 업로드한 계약서의 주요 조항입니다:{filename_info}
 
 {articles_text}
 
@@ -423,7 +532,8 @@ def classify_contract_task(contract_id: str):
         result = agent.classify(
             contract_id=contract_id,
             parsed_data=contract.parsed_data,
-            knowledge_base_loader=kb_loader
+            knowledge_base_loader=kb_loader,
+            filename=contract.filename
         )
 
         # 분류 결과 DB 저장

@@ -9,6 +9,7 @@ import math
 from typing import Dict, Any, List, Optional
 from collections import defaultdict, Counter
 from openai import AzureOpenAI
+from backend.shared.services.embedding_loader import EmbeddingLoader
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class ArticleMatcher:
         
         # HybridSearcher 인스턴스 (계약 유형별)
         self.searchers = {}
+        self.embedding_loader = EmbeddingLoader()
         
         logger.info(f"ArticleMatcher 초기화 완료 (match_threshold={similarity_threshold}, special_threshold={special_threshold})")
     
@@ -169,7 +171,15 @@ class ArticleMatcher:
         
         # 하위항목별 매칭 결과
         sub_item_results = []
-        
+
+        article_no = self._safe_int(user_article.get('number'))
+        stored_article_embedding = None
+        title_embedding_vector = None
+        if contract_id and article_no is not None:
+            stored_article_embedding = self.embedding_loader.load_article_embedding(contract_id, article_no)
+            if stored_article_embedding:
+                title_embedding_vector = stored_article_embedding.get('title_embedding')
+
         for idx, sub_item in enumerate(content_items, 1):
             # 정규화
             normalized = self._normalize_sub_item(sub_item)
@@ -181,6 +191,10 @@ class ArticleMatcher:
             text_query, title_query = self._build_search_queries(normalized, article_title)
             
             logger.debug(f"    하위항목 {idx} 검색: text={text_query[:50]}..., title={title_query}")
+            sub_embedding_vector = None
+            if stored_article_embedding:
+                sub_embedding_vector = self._get_sub_item_embedding(stored_article_embedding, idx)
+
 
             # 하이브리드 검색 수행 (top-1 청크, 가중치 전달)
             chunk_results = self._hybrid_search(
@@ -191,7 +205,9 @@ class ArticleMatcher:
                 contract_id=contract_id,
                 text_weight=text_weight,
                 title_weight=title_weight,
-                dense_weight=dense_weight
+                dense_weight=dense_weight,
+                text_embedding=sub_embedding_vector,
+                title_embedding=title_embedding_vector
             )
             
             if not chunk_results:
@@ -286,6 +302,23 @@ class ArticleMatcher:
         """
         return (sub_item, article_title)
     
+    def _get_sub_item_embedding(
+        self,
+        article_embedding: Dict[str, Any],
+        sub_item_index: int
+    ) -> Optional[List[float]]:
+        for sub_item in article_embedding.get('sub_items', []):
+            if sub_item.get('index') == sub_item_index:
+                return sub_item.get('text_embedding')
+        return None
+
+    @staticmethod
+    def _safe_int(value: Any) -> Optional[int]:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     def _get_or_create_searcher(self, contract_type: str):
         """
         계약 유형별 HybridSearcher 가져오기 (없으면 생성)
@@ -351,23 +384,12 @@ class ArticleMatcher:
         contract_id: str = None,
         text_weight: float = 0.7,
         title_weight: float = 0.3,
-        dense_weight: float = 0.85
+        dense_weight: float = 0.85,
+        text_embedding: Optional[List[float]] = None,
+        title_embedding: Optional[List[float]] = None
     ) -> List[Dict]:
         """
         하이브리드 검색 수행 (FAISS + Whoosh, 제목/본문 분리)
-
-        Args:
-            text_query: 본문 쿼리
-            title_query: 제목 쿼리
-            contract_type: 계약 유형
-            top_k: 검색 결과 개수
-            contract_id: 계약 ID (선택)
-            text_weight: 본문 가중치 (기본값: 0.7)
-            title_weight: 제목 가중치 (기본값: 0.3)
-            dense_weight: 시멘틱 가중치 (기본값: 0.85)
-
-        Returns:
-            검색 결과 청크 리스트
         """
         searcher = self._get_or_create_searcher(contract_type)
 
@@ -375,20 +397,30 @@ class ArticleMatcher:
             logger.error(f"Searcher를 생성할 수 없습니다: {contract_type}")
             return []
 
-        # 가중치 설정 (본문:제목, Dense:Sparse)
-        searcher.set_field_weights(text_weight)  # title_weight는 자동 계산 (1.0 - text_weight)
-        searcher.dense_weight = dense_weight  # sparse_weight는 자동 계산 (1.0 - dense_weight)
+        searcher.set_field_weights(text_weight)
+        searcher.dense_weight = dense_weight
 
-        # 하이브리드 검색 수행 (제목/본문 분리)
-        results = searcher.search(
-            text_query=text_query,
-            title_query=title_query,
-            top_k=top_k,
-            contract_id=contract_id
-        )
+        use_precomputed = text_embedding is not None or title_embedding is not None
+
+        if use_precomputed:
+            results = searcher.search_with_embeddings(
+                text_query=text_query,
+                title_query=title_query,
+                text_embedding=text_embedding,
+                title_embedding=title_embedding,
+                top_k=top_k,
+                contract_id=contract_id
+            )
+        else:
+            results = searcher.search(
+                text_query=text_query,
+                title_query=title_query,
+                top_k=top_k,
+                contract_id=contract_id
+            )
 
         return results
-    
+
     def _select_best_article_from_chunks(
         self,
         chunk_results: List[Dict]
