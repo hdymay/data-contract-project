@@ -8,7 +8,12 @@
       "Bash(git ls-tree:*)",
       "Bash(python:*)",
       "Bash(git add:*)",
-      "Read(//c//**)"
+      "Read(//c//**)",
+      "Bash(git log:*)",
+      "Bash(git checkout:*)",
+      "Bash(\"c:\\Python Projects\\data-contract-project\\backend\\consistency_agent\\a1_node\\__init__.py\")",
+      "Bash(\"c:\\Python Projects\\data-contract-project\\backend\\consistency_agent\\a1_node\\matching_verifier.py\")",
+      "Bash(\"c:\\Python Projects\\data-contract-project\\backend\\consistency_agent\\a1_node\\a1_node.py\")"
     ],
     "deny": [],
     "ask": []
