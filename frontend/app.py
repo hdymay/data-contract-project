@@ -438,13 +438,13 @@ def start_validation(contract_id: str):
         st.session_state.validation_started = False
 
 
-def poll_validation_result(contract_id: str, max_attempts: int = 60, interval: int = 3):
+def poll_validation_result(contract_id: str, max_attempts: int = 600, interval: int = 3):
     """
     검증 결과를 폴링하여 조회
     
     Args:
         contract_id: 계약서 ID
-        max_attempts: 최대 시도 횟수 (기본 60회 = 3분)
+        max_attempts: 최대 시도 횟수 (기본 600회 = 30분)
         interval: 폴링 간격(초) (기본 3초)
         
     Returns:
@@ -634,6 +634,106 @@ def display_validation_result(validation_data: dict):
         # 처리 시간 (for loop 외부에 표시)
         processing_time = content_analysis.get('processing_time', 0.0)
         st.markdown(f"<p style='text-align:right; color:#6b7280; font-size:0.85rem;'>처리 시간: {processing_time:.2f}초</p>", unsafe_allow_html=True)
+    
+    # 누락 조문 분석 결과 표시
+    completeness_check = validation_result.get('completeness_check', {})
+    missing_article_analysis = completeness_check.get('missing_article_analysis', [])
+    
+    if missing_article_analysis:
+        st.markdown('<div style="height: 2rem;"></div>', unsafe_allow_html=True)
+        st.markdown("### 🔍 누락 조문 재검증 결과")
+        
+        # 통계 표시
+        total_missing = len(missing_article_analysis)
+        truly_missing = sum(1 for item in missing_article_analysis if item.get('is_truly_missing', True))
+        false_positive = total_missing - truly_missing
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("1차 누락 조문", f"{total_missing}개")
+        with col2:
+            st.metric("실제 누락", f"{truly_missing}개", delta=None, delta_color="off")
+        with col3:
+            st.metric("오탐지 (포함됨)", f"{false_positive}개", delta=None, delta_color="off")
+        
+        st.markdown("---")
+        
+        # 각 누락 조문별 상세 분석
+        for idx, analysis in enumerate(missing_article_analysis, 1):
+            std_article_id = analysis.get('standard_article_id', '')
+            std_article_title = analysis.get('standard_article_title', '')
+            is_truly_missing = analysis.get('is_truly_missing', True)
+            confidence = analysis.get('confidence', 0.0)
+            
+            # 헤더
+            if is_truly_missing:
+                st.markdown(f"<h4 style='color:#ef4444;'>❌ {std_article_id} ({std_article_title})</h4>", unsafe_allow_html=True)
+                st.markdown(f"**상태**: 실제 누락 확인 (신뢰도: {confidence:.1%})")
+            else:
+                matched_user = analysis.get('matched_user_article', {})
+                matched_no = matched_user.get('number', '?') if matched_user else '?'
+                st.markdown(f"<h4 style='color:#10b981;'>✅ {std_article_id} ({std_article_title})</h4>", unsafe_allow_html=True)
+                st.markdown(f"**상태**: 누락 아님 - 제{matched_no}조에 포함 (신뢰도: {confidence:.1%})")
+            
+            # 판단 근거
+            reasoning = analysis.get('reasoning', '')
+            if reasoning:
+                st.markdown("**판단 근거**:")
+                st.markdown(reasoning)
+            
+            # 증거 (상세 분석)
+            evidence = analysis.get('evidence', '')
+            if evidence:
+                with st.expander("📄 상세 증거 보기"):
+                    # 개행을 markdown 개행으로 변환
+                    formatted_evidence = evidence.replace('\n', '  \n')
+                    st.markdown(formatted_evidence)
+            
+            # 위험도 평가 (실제 누락인 경우만)
+            if is_truly_missing:
+                risk_assessment = analysis.get('risk_assessment', '')
+                if risk_assessment:
+                    st.markdown("**위험도 평가**:")
+                    st.warning(risk_assessment)
+            
+            # 권고사항
+            recommendation = analysis.get('recommendation', '')
+            if recommendation:
+                st.markdown("**권고사항**:")
+                st.info(recommendation)
+            
+            # 후보 조문 분석 (있는 경우)
+            top_candidates = analysis.get('top_candidates', [])
+            if top_candidates:
+                with st.expander(f"🔎 검토된 후보 조문 ({len(top_candidates)}개)"):
+                    for i, candidate in enumerate(top_candidates, 1):
+                        user_article = candidate.get('user_article', {})
+                        user_no = user_article.get('number', '?')
+                        user_title = user_article.get('title', '')
+                        similarity = candidate.get('similarity', 0.0)
+                        
+                        st.markdown(f"**후보 {i}**: 제{user_no}조 ({user_title}) - 유사도: {similarity:.3f}")
+                        
+                        # 후보별 LLM 분석 결과
+                        candidates_analysis = analysis.get('candidates_analysis', [])
+                        if i <= len(candidates_analysis):
+                            cand_analysis = candidates_analysis[i-1]
+                            is_match = cand_analysis.get('is_match', False)
+                            cand_confidence = cand_analysis.get('confidence', 0.0)
+                            match_type = cand_analysis.get('match_type', '')
+                            cand_reasoning = cand_analysis.get('reasoning', '')
+                            
+                            if is_match:
+                                st.markdown(f"  - ✅ 매칭 (신뢰도: {cand_confidence:.1%}, 유형: {match_type})")
+                            else:
+                                st.markdown(f"  - ❌ 매칭 안됨 (신뢰도: {cand_confidence:.1%}, 유형: {match_type})")
+                            
+                            if cand_reasoning:
+                                st.markdown(f"  - 근거: {cand_reasoning}")
+                        
+                        st.markdown("")  # 여백
+            
+            st.markdown("---")
 
 
 if __name__ == "__main__":

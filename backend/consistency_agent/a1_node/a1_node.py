@@ -1,4 +1,4 @@
-﻿"""
+"""
 A1 Node - Completeness Check (완전성 검증)
 
 사용자 계약서 조문별로 표준계약과 매칭하여 누락된 조문을 식별
@@ -153,10 +153,20 @@ class CompletenessCheckNode:
                    f"표준 {len(matched_standard_articles)}/{total_standard_articles}")
         logger.info(f"  누락 조문: {len(missing_articles)}개")
 
-        # 3단계: 누락 조문 재검증 (TODO: 구현 필요)
-        # missing_article_analysis = self._verify_missing_articles(
-        #     missing_articles, user_articles, contract_type, contract_id
-        # )
+        # 3단계: 누락 조문 재검증 (역방향 검증)
+        missing_article_analysis = []
+        if missing_articles:
+            logger.info(f"  누락 조문 재검증 시작: {len(missing_articles)}개")
+            missing_article_analysis = self._verify_missing_articles(
+                missing_articles,
+                user_articles,
+                contract_type,
+                contract_id,
+                text_weight,
+                title_weight,
+                dense_weight
+            )
+            logger.info(f"  누락 조문 재검증 완료: {len(missing_article_analysis)}개")
 
         # 결과 생성
         processing_time = time.time() - start_time
@@ -169,6 +179,7 @@ class CompletenessCheckNode:
             "total_standard_articles": total_standard_articles,
             "matched_standard_articles": len(matched_standard_articles),
             "missing_standard_articles": missing_articles,
+            "missing_article_analysis": missing_article_analysis,
             "matching_details": matching_details,
             "processing_time": processing_time,
             "verification_date": datetime.now().isoformat()
@@ -301,3 +312,135 @@ class CompletenessCheckNode:
         if match:
             return int(match.group())
         return 999999
+
+    def _verify_missing_articles(
+        self,
+        missing_articles: List[Dict],
+        user_articles: List[Dict],
+        contract_type: str,
+        contract_id: str,
+        text_weight: float,
+        title_weight: float,
+        dense_weight: float
+    ) -> List[Dict]:
+        """
+        누락 조문 재검증 (역방향 검증)
+        
+        누락된 것으로 식별된 표준 조문들이 실제로 사용자 계약서에 없는지 재확인
+        
+        Args:
+            missing_articles: 누락된 표준 조문 리스트
+            user_articles: 사용자 계약서 조문 리스트
+            contract_type: 계약 유형
+            contract_id: 계약서 ID
+            text_weight: 본문 가중치
+            title_weight: 제목 가중치
+            dense_weight: 시멘틱 가중치
+        
+        Returns:
+            누락 조문 분석 결과 리스트
+            [
+                {
+                    "standard_article_id": str,
+                    "standard_article_title": str,
+                    "is_truly_missing": bool,
+                    "confidence": float,
+                    "matched_user_article": Dict or None,
+                    "reasoning": str,
+                    "recommendation": str,
+                    "evidence": str,
+                    "risk_assessment": str,
+                    "top_candidates": List[Dict]
+                },
+                ...
+            ]
+        """
+        analysis_results = []
+        
+        # 사용자 조문 FAISS 인덱스 생성 (한 번만)
+        logger.info(f"  사용자 조문 FAISS 인덱스 생성 시작...")
+        logger.info(f"    - 사용자 조문 수: {len(user_articles)}개")
+        logger.info(f"    - contract_id: {contract_id}")
+        
+        user_faiss_index, embedding_map = self.article_matcher.build_user_faiss_index(
+            user_articles=user_articles,
+            contract_id=contract_id
+        )
+        
+        if user_faiss_index is None:
+            logger.error(f"  ❌ FAISS 인덱스 생성 실패 - 누락 검증 중단")
+            logger.error(f"    원인: 임베딩을 하나도 로드하지 못했습니다")
+            logger.error(f"    확인사항: 1) contract_id 정확한지, 2) DB에 임베딩 저장되어 있는지")
+            return []
+        
+        logger.info(f"  ✓ FAISS 인덱스 생성 완료: {len(embedding_map)}개 하위항목")
+        
+        for i, missing_article in enumerate(missing_articles, 1):
+            parent_id = missing_article['parent_id']
+            title = missing_article['title']
+            
+            logger.info(f"  [{i}/{len(missing_articles)}] 누락 조문 재검증: {parent_id} ({title})")
+            
+            try:
+                # 1단계: 역방향 검색 (표준 → 사용자) - FAISS 인덱스 재사용
+                user_candidates = self.article_matcher.find_matching_user_articles(
+                    standard_article=missing_article,
+                    user_faiss_index=user_faiss_index,
+                    embedding_map=embedding_map,
+                    contract_type=contract_type,
+                    top_k=3  # Top-3 후보
+                )
+                
+                # 2단계: LLM 재검증
+                verification_result = self.matching_verifier.verify_missing_article_forward(
+                    standard_article=missing_article,
+                    user_candidates=user_candidates,
+                    contract_type=contract_type
+                )
+                
+                # 결과 저장
+                analysis_results.append({
+                    "standard_article_id": parent_id,
+                    "standard_article_title": title,
+                    "is_truly_missing": verification_result['is_truly_missing'],
+                    "confidence": verification_result['confidence'],
+                    "matched_user_article": verification_result.get('matched_user_article'),
+                    "reasoning": verification_result['reasoning'],
+                    "recommendation": verification_result['recommendation'],
+                    "evidence": verification_result['evidence'],
+                    "risk_assessment": verification_result['risk_assessment'],
+                    "top_candidates": user_candidates,
+                    "candidates_analysis": verification_result.get('candidates_analysis', [])
+                })
+                
+                # 로깅
+                if verification_result['is_truly_missing']:
+                    logger.warning(f"    → 실제 누락 확인 (신뢰도: {verification_result['confidence']:.2f})")
+                else:
+                    matched_no = verification_result.get('matched_user_article', {}).get('number', '?')
+                    logger.info(f"    → 누락 아님: 제{matched_no}조에 포함 (신뢰도: {verification_result['confidence']:.2f})")
+                
+            except Exception as e:
+                logger.error(f"    재검증 실패: {e}")
+                # 실패 시 기본 결과
+                analysis_results.append({
+                    "standard_article_id": parent_id,
+                    "standard_article_title": title,
+                    "is_truly_missing": True,
+                    "confidence": 0.5,
+                    "matched_user_article": None,
+                    "reasoning": f"재검증 중 오류 발생: {str(e)}",
+                    "recommendation": f"'{title}' 조항 확인 필요",
+                    "evidence": "재검증 실패",
+                    "risk_assessment": "오류로 인해 정확한 평가 불가",
+                    "top_candidates": [],
+                    "candidates_analysis": []
+                })
+        
+        # 실제 누락 조문 통계
+        truly_missing_count = sum(1 for r in analysis_results if r['is_truly_missing'])
+        false_positive_count = len(analysis_results) - truly_missing_count
+        
+        logger.info(f"  재검증 요약: 실제 누락 {truly_missing_count}개, 오탐지 {false_positive_count}개")
+        
+        return analysis_results

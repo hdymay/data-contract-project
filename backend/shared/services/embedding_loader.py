@@ -59,18 +59,26 @@ class EmbeddingLoader:
         """
         embeddings = self.load_embeddings(contract_id)
         if not embeddings:
+            logger.debug(f"임베딩 데이터 없음: contract_id={contract_id}")
             return None
 
         article_entries = embeddings.get("article_embeddings", [])
+        if not article_entries:
+            logger.debug(f"article_embeddings 필드 없음: contract_id={contract_id}")
+            return None
+        
         for entry in article_entries:
             if entry.get("article_no") != article_no:
                 continue
             if sub_item_index is None:
+                logger.debug(f"임베딩 로드 성공: 제{article_no}조")
                 return entry
             for sub_item in entry.get("sub_items", []):
                 if sub_item.get("index") == sub_item_index:
                     return sub_item
             return None
+        
+        logger.debug(f"제{article_no}조 임베딩 없음 (총 {len(article_entries)}개 조문)")
         return None
 
     def validate_model_compatibility(

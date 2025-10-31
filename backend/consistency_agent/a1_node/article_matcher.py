@@ -639,3 +639,294 @@ class ArticleMatcher:
         except Exception as e:
             logger.error(f"    조 청크 로드 실패: {e}")
             return []
+
+    def build_user_faiss_index(
+        self,
+        user_articles: List[Dict[str, Any]],
+        contract_id: str
+    ) -> tuple:
+        """
+        사용자 조문으로 FAISS 인덱스 생성 (역방향 검색용)
+        
+        Args:
+            user_articles: 사용자 계약서 조문 리스트
+            contract_id: 계약서 ID
+        
+        Returns:
+            (faiss_index, embedding_map)
+            - faiss_index: FAISS 인덱스
+            - embedding_map: 인덱스 → (조문, 하위항목) 매핑
+        """
+        import numpy as np
+        import faiss
+        
+        logger.info(f"  사용자 조문 FAISS 인덱스 생성 중...")
+        logger.info(f"    contract_id: {contract_id}")
+        
+        # 먼저 전체 임베딩 데이터 확인
+        all_embeddings = self.embedding_loader.load_embeddings(contract_id)
+        if not all_embeddings:
+            logger.error(f"    ❌ 임베딩 데이터 전체가 없음!")
+            return None, []
+        
+        article_embeddings = all_embeddings.get("article_embeddings", [])
+        logger.info(f"    DB에 저장된 조문 임베딩: {len(article_embeddings)}개")
+        
+        # 모든 하위항목 임베딩 수집
+        embeddings_list = []
+        embedding_map = []  # [(user_article, sub_item_index, sub_item_text), ...]
+        
+        for user_article in user_articles:
+            user_no = user_article.get('number')
+            user_content = user_article.get('content', [])
+            
+            # 임베딩 로드
+            stored_embedding = self.embedding_loader.load_article_embedding(contract_id, user_no)
+            if not stored_embedding:
+                logger.warning(f"    제{user_no}조 임베딩 없음 - 건너뜀")
+                continue
+            
+            # 각 하위항목 임베딩 추가
+            for idx, sub_item in enumerate(user_content, 1):
+                sub_embedding = self._get_sub_item_embedding(stored_embedding, idx)
+                if sub_embedding is not None:
+                    embeddings_list.append(sub_embedding)
+                    embedding_map.append({
+                        'user_article': user_article,
+                        'sub_item_index': idx,
+                        'sub_item_text': sub_item
+                    })
+        
+        if not embeddings_list:
+            logger.error(f"    임베딩을 하나도 로드하지 못함!")
+            return None, []
+        
+        # FAISS 인덱스 생성
+        embeddings_array = np.array(embeddings_list, dtype=np.float32)
+        dimension = embeddings_array.shape[1]
+        faiss_index = faiss.IndexFlatL2(dimension)
+        faiss_index.add(embeddings_array)
+        
+        logger.info(f"    FAISS 인덱스 생성 완료: {len(embeddings_list)}개 하위항목 (dimension: {dimension})")
+        
+        return faiss_index, embedding_map
+    
+    def find_matching_user_articles(
+        self,
+        standard_article: Dict[str, Any],
+        user_faiss_index,
+        embedding_map: List[Dict],
+        contract_type: str,
+        top_k: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        역방향 검색: 표준 조문으로 사용자 계약서 조문 검색 (FAISS 기반)
+        
+        Args:
+            standard_article: 표준 조문 정보
+                {
+                    'parent_id': str,
+                    'title': str,
+                    'chunks': List[Dict]
+                }
+            user_faiss_index: 사용자 조문 FAISS 인덱스
+            embedding_map: 인덱스 → 조문 매핑
+            contract_type: 계약 유형 (FAISS 인덱스 로드용)
+            top_k: 반환할 최대 결과 개수 (조 단위)
+        
+        Returns:
+            매칭된 사용자 조문 리스트 (유사도 순 정렬, 조 단위)
+        """
+        import numpy as np
+        
+        parent_id = standard_article.get('parent_id')
+        title = standard_article.get('title', '')
+        chunks = standard_article.get('chunks', [])
+        
+        logger.info(f"    역방향 검색 시작: {parent_id} ({title})")
+        logger.info(f"      - 표준 청크 수: {len(chunks)}개")
+        logger.info(f"      - FAISS 인덱스: {'있음' if user_faiss_index is not None else '없음'}")
+        logger.info(f"      - embedding_map 크기: {len(embedding_map)}개")
+        
+        if not chunks:
+            logger.warning(f"      청크가 없습니다")
+            return []
+        
+        if user_faiss_index is None:
+            logger.error(f"      FAISS 인덱스가 없습니다")
+            return []
+        
+        # 표준 계약서 FAISS 인덱스 및 청크 로드
+        standard_faiss_indexes = self.kb_loader.load_faiss_indexes(contract_type)
+        standard_chunks = self.kb_loader.load_chunks(contract_type)
+        
+        if not standard_faiss_indexes or not standard_chunks:
+            logger.error(f"      표준 계약서 인덱스/청크 로드 실패: {contract_type}")
+            return []
+        
+        # text 인덱스만 사용 (본문 검색)
+        standard_faiss_text, _ = standard_faiss_indexes
+        
+        # 청크 ID → 인덱스 매핑 생성
+        chunk_id_to_index = {chunk['id']: idx for idx, chunk in enumerate(standard_chunks)}
+        
+        # 사용자 조문별 점수 집계
+        user_article_scores = defaultdict(lambda: {
+            'scores': [],
+            'matched_chunks': [],
+            'user_article': None
+        })
+        
+        # 각 표준 청크로 FAISS 검색
+        total_searches = 0
+        total_matches = 0
+        chunks_without_embedding = 0
+        
+        for chunk in chunks:
+            chunk_id = chunk.get('id')
+            
+            # 청크 인덱스 찾기
+            chunk_index = chunk_id_to_index.get(chunk_id)
+            if chunk_index is None:
+                chunks_without_embedding += 1
+                logger.debug(f"      청크 인덱스 없음: {chunk_id}")
+                continue
+            
+            # FAISS 인덱스에서 임베딩 추출
+            try:
+                chunk_embedding = standard_faiss_text.reconstruct(chunk_index)
+            except Exception as e:
+                chunks_without_embedding += 1
+                logger.debug(f"      임베딩 추출 실패: {chunk_id}, {e}")
+                continue
+            
+            total_searches += 1
+            
+            # FAISS 검색 (Top-10 하위항목)
+            query_vector = np.array([chunk_embedding], dtype=np.float32)
+            distances, indices = user_faiss_index.search(query_vector, k=10)
+            
+            # 검색 결과 처리
+            chunk_matches = 0
+            for idx, distance in zip(indices[0], distances[0]):
+                if idx >= len(embedding_map):
+                    continue
+                
+                match_info = embedding_map[idx]
+                user_article = match_info['user_article']
+                user_no = user_article.get('number')
+                
+                # L2 거리를 유사도로 변환
+                similarity = 1.0 / (1.0 + float(distance))
+                
+                logger.debug(f"        청크 매칭: 제{user_no}조 하위{match_info['sub_item_index']} - 유사도 {similarity:.3f}")
+                
+                if similarity > 0.5:  # 임계값
+                    chunk_matches += 1
+                    user_article_scores[user_no]['scores'].append(similarity)
+                    user_article_scores[user_no]['matched_chunks'].append({
+                        'standard_chunk': chunk,
+                        'user_sub_item': match_info['sub_item_text'],
+                        'user_sub_item_index': match_info['sub_item_index'],
+                        'similarity': similarity
+                    })
+                    user_article_scores[user_no]['user_article'] = user_article
+            
+            if chunk_matches > 0:
+                total_matches += chunk_matches
+                logger.debug(f"      청크 검색 완료: {chunk_matches}개 매칭")
+        
+        if chunks_without_embedding > 0:
+            logger.warning(f"      임베딩 없는 청크: {chunks_without_embedding}개")
+        
+        logger.info(f"      총 {total_searches}개 청크 검색, {total_matches}개 매칭 발견")
+        
+        # 조별 평균 점수 계산 및 정렬
+        results = []
+        for user_no, data in user_article_scores.items():
+            if not data['scores']:
+                continue
+            
+            avg_score = sum(data['scores']) / len(data['scores'])
+            max_score = max(data['scores'])
+            
+            results.append({
+                'user_article': data['user_article'],
+                'similarity': max_score,
+                'avg_similarity': avg_score,
+                'num_matches': len(data['scores']),
+                'matched_chunks': data['matched_chunks']
+            })
+        
+        # 유사도 순 정렬
+        results.sort(key=lambda x: x['similarity'], reverse=True)
+        
+        # Top-K 반환
+        top_results = results[:top_k]
+        
+        logger.debug(f"      검색 완료: {len(top_results)}개 사용자 조문")
+        
+        return top_results
+    
+    def _calculate_cosine_similarity(
+        self,
+        embedding1: List[float],
+        embedding2: List[float]
+    ) -> float:
+        """
+        코사인 유사도 계산
+        
+        Args:
+            embedding1: 첫 번째 임베딩 벡터
+            embedding2: 두 번째 임베딩 벡터
+        
+        Returns:
+            코사인 유사도 (0.0 ~ 1.0)
+        """
+        import numpy as np
+        
+        try:
+            vec1 = np.array(embedding1)
+            vec2 = np.array(embedding2)
+            
+            # 코사인 유사도 계산
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            
+            similarity = dot_product / (norm1 * norm2)
+            
+            # -1 ~ 1 범위를 0 ~ 1로 변환
+            return (similarity + 1) / 2
+            
+        except Exception as e:
+            logger.warning(f"코사인 유사도 계산 실패: {e}")
+            return 0.0
+    
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """
+        텍스트 기반 유사도 계산 (fallback)
+        
+        공통 단어 비율 기반 간단한 유사도
+        
+        Args:
+            text1: 첫 번째 텍스트
+            text2: 두 번째 텍스트
+        
+        Returns:
+            유사도 점수 (0.0 ~ 1.0)
+        """
+        # 공통 단어 비율 계산
+        words1 = set(text1.split())
+        words2 = set(text2.split())
+        
+        if not words1 or not words2:
+            return 0.0
+        
+        intersection = words1 & words2
+        union = words1 | words2
+        
+        return len(intersection) / len(union) if union else 0.0
