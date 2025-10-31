@@ -51,6 +51,7 @@ class UserContractParser:
                 "preamble": [str, str, ...],  # "제1조" 이전 텍스트들
                 "articles": [
                     {
+                        "article_id": str,  # 고유 ID (예: "user_article_001")
                         "number": int,
                         "title": str,
                         "text": str,
@@ -83,6 +84,7 @@ class UserContractParser:
                 # 새로운 조 시작
                 article_num = int(article_match.group(1))
                 current_article = {
+                    "article_id": f"user_article_{article_num:03d}",  # 고유 ID (3자리 패딩)
                     "number": article_num,
                     "title": self._extract_title(text),
                     "text": text,
