@@ -38,13 +38,13 @@ class ContentComparator:
         contract_type: str
     ) -> Dict[str, Any]:
         """
-        조항 내용 비교 (단일 또는 다중 표준 조항)
+        조항 내용 비교
+
+        A1에서 이미 관련 조항을 선택했으므로, 여기서는 내용 분석만 수행
 
         Args:
             user_article: 사용자 조항 (content 배열 포함)
-            standard_chunks_list: 표준계약서 조항들의 청크 리스트
-                - 1개: 직접 비교
-                - 2개 이상: LLM이 관련 조항 선택 후 비교
+            standard_chunks_list: 표준계약서 조항들의 청크 리스트 (A1에서 선택된 조항들)
             contract_type: 계약 유형
 
         Returns:
@@ -53,7 +53,7 @@ class ContentComparator:
                 "missing_items": List[str],
                 "insufficient_items": List[str],
                 "analysis": str,
-                "selected_articles": List[str],  # 선택된 표준 조항 ID들 (다중 매칭시)
+                "selected_articles": List[str],  # 조항 ID 목록
                 "prompt_tokens": int,
                 "completion_tokens": int,
                 "total_tokens": int
@@ -69,8 +69,8 @@ class ContentComparator:
                 user_article, standard_chunks_list[0], user_text, contract_type
             )
         else:
-            # 2개 이상: 관련 조항 선택 후 비교
-            return self._compare_multiple_articles(
+            # 2개 이상: 모든 조항을 종합하여 비교 (A1에서 이미 선택됨)
+            return self._compare_multiple_selected_articles(
                 user_article, standard_chunks_list, user_text, contract_type
             )
 
@@ -173,7 +173,7 @@ class ContentComparator:
                 "total_tokens": 0
             }
 
-    def _compare_multiple_articles(
+    def _compare_multiple_selected_articles(
         self,
         user_article: Dict[str, Any],
         standard_chunks_list: List[List[Dict[str, Any]]],
@@ -181,67 +181,35 @@ class ContentComparator:
         contract_type: str
     ) -> Dict[str, Any]:
         """
-        다중 표준 조항과 비교 (2단계)
-        1단계: LLM이 관련 조항 선택
-        2단계: 선택된 조항들을 기준으로 내용 분석
+        다중 표준 조항과 비교 (A1에서 이미 선택된 조항들)
+
+        A1에서 매칭 검증을 거친 조항들을 모두 종합하여 내용 분석
 
         Args:
             user_article: 사용자 조항
-            standard_chunks_list: 표준계약서 조항들의 청크 리스트
+            standard_chunks_list: 표준계약서 조항들의 청크 리스트 (A1에서 선택됨)
             user_text: 포맷팅된 사용자 조항 텍스트
             contract_type: 계약 유형
 
         Returns:
             비교 결과
         """
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
+        # 조항 ID 추출
+        selected_article_ids = [
+            chunks[0].get('parent_id') for chunks in standard_chunks_list
+            if chunks and chunks[0].get('parent_id')
+        ]
 
-        # 1단계: 관련 조항 선택
-        selection_result = self._select_relevant_articles(
+        logger.info(f"  내용 분석 대상: {', '.join(selected_article_ids)}")
+
+        # 내용 분석 수행
+        analysis_result = self._analyze_selected_articles(
             user_article, standard_chunks_list, user_text, contract_type
         )
 
-        total_prompt_tokens += selection_result.get('prompt_tokens', 0)
-        total_completion_tokens += selection_result.get('completion_tokens', 0)
-
-        selected_article_ids = selection_result.get('selected_articles', [])
-
-        if not selected_article_ids:
-            logger.warning(f"  관련 조항 선택 실패")
-            return {
-                "has_issues": False,
-                "missing_items": [],
-                "insufficient_items": [],
-                "analysis": "LLM이 관련 조항을 선택하지 못했습니다.",
-                "selected_articles": [],
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens
-            }
-
-        logger.info(f"  선택된 조항: {', '.join(selected_article_ids)}")
-
-        # 선택된 조항들의 청크만 필터링
-        selected_chunks_list = [
-            chunks for chunks in standard_chunks_list
-            if chunks and chunks[0].get('parent_id') in selected_article_ids
-        ]
-
-        # 2단계: 선택된 조항들을 기준으로 내용 분석
-        analysis_result = self._analyze_selected_articles(
-            user_article, selected_chunks_list, user_text, contract_type
-        )
-
-        total_prompt_tokens += analysis_result.get('prompt_tokens', 0)
-        total_completion_tokens += analysis_result.get('completion_tokens', 0)
-
-        analysis_result['prompt_tokens'] = total_prompt_tokens
-        analysis_result['completion_tokens'] = total_completion_tokens
-        analysis_result['total_tokens'] = total_prompt_tokens + total_completion_tokens
         analysis_result['selected_articles'] = selected_article_ids
 
-        logger.info(f"  LLM 다중 비교 완료 (토큰: {analysis_result['total_tokens']})")
+        logger.info(f"  LLM 다중 비교 완료 (토큰: {analysis_result.get('total_tokens', 0)})")
 
         return analysis_result
 
@@ -309,84 +277,8 @@ class ContentComparator:
 
         return "\n".join(lines)
 
-    def _select_relevant_articles(
-        self,
-        user_article: Dict[str, Any],
-        standard_chunks_list: List[List[Dict[str, Any]]],
-        user_text: str,
-        contract_type: str
-    ) -> Dict[str, Any]:
-        """
-        관련 표준 조항 선택 (1단계)
-
-        Args:
-            user_article: 사용자 조항
-            standard_chunks_list: 표준계약서 조항들의 청크 리스트
-            user_text: 포맷팅된 사용자 조항 텍스트
-            contract_type: 계약 유형
-
-        Returns:
-            {
-                "selected_articles": List[str],  # 선택된 조항 ID들
-                "prompt_tokens": int,
-                "completion_tokens": int
-            }
-        """
-        # 모든 후보 조항 포맷팅
-        candidates_text = ""
-        for chunks in standard_chunks_list:
-            if chunks:
-                candidates_text += self._format_standard_article(chunks) + "\n\n---\n\n"
-
-        # 선택 프롬프트 생성
-        prompt = self._build_selection_prompt(
-            user_article_no=user_article.get('number'),
-            user_article_title=user_article.get('title', ''),
-            user_text=user_text,
-            candidates_text=candidates_text,
-            contract_type=contract_type
-        )
-
-        try:
-            response = self.azure_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "당신은 데이터 계약서 전문가입니다. 사용자 조항과 실질적으로 관련있는 표준계약서 조항들을 선택합니다."
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                temperature=0.3,
-                max_tokens=500
-            )
-
-            selection_text = response.choices[0].message.content.strip()
-            usage = response.usage
-
-            # 선택된 조항 ID 파싱
-            selected_ids = self._parse_selection_response(selection_text, standard_chunks_list)
-
-            logger.info(f"  조항 선택 완료: {len(selected_ids)}개 (토큰: {usage.total_tokens})")
-
-            return {
-                "selected_articles": selected_ids,
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens
-            }
-
-        except Exception as e:
-            logger.error(f"  조항 선택 실패: {e}")
-            # 실패 시 모든 후보 반환
-            all_ids = [chunks[0].get('parent_id') for chunks in standard_chunks_list if chunks]
-            return {
-                "selected_articles": all_ids,
-                "prompt_tokens": 0,
-                "completion_tokens": 0
-            }
+    # _select_relevant_articles 메서드는 A1의 MatchingVerifier로 이동됨
+    # A1에서 이미 관련 조항을 선택하므로 여기서는 제거
 
     def _analyze_selected_articles(
         self,
@@ -482,65 +374,7 @@ class ContentComparator:
                 "completion_tokens": 0
             }
 
-    def _build_selection_prompt(
-        self,
-        user_article_no: int,
-        user_article_title: str,
-        user_text: str,
-        candidates_text: str,
-        contract_type: str
-    ) -> str:
-        """
-        조항 선택 프롬프트 생성
-
-        Args:
-            user_article_no: 사용자 조항 번호
-            user_article_title: 사용자 조항 제목
-            user_text: 포맷팅된 사용자 조항
-            candidates_text: 포맷팅된 후보 조항들
-            contract_type: 계약 유형
-
-        Returns:
-            프롬프트 텍스트
-        """
-        contract_type_names = {
-            "provide": "데이터 제공 계약",
-            "create": "데이터 생성 계약",
-            "process": "데이터 가공 계약",
-            "brokerage_provider": "데이터 중개 계약 (제공자용)",
-            "brokerage_user": "데이터 중개 계약 (이용자용)"
-        }
-
-        contract_name = contract_type_names.get(contract_type, contract_type)
-
-        prompt = f"""# 관련 표준 조항 선택
-
-## 계약 유형
-{contract_name}
-
-## 사용자 계약서 조항
-제{user_article_no}조 ({user_article_title})
-{user_text}
-
-## 후보 표준계약서 조항들
-아래 조항들은 사용자 조항과 연관되어 있을 가능성이 있는 표준계약서 조항들입니다.
-
-{candidates_text}
-
----
-
-**과제**: 위의 후보 조항들 중에서 사용자 계약서 조항(제{user_article_no}조)과 **실제로 관련있는** 표준계약서 조항들을 **모두**(1개 이상) 선택하세요.
-
-**중요 사항**:
-- 사용자 조항의 내용이 표준계약서 기준으로는 여러 조문에 걸쳐 있을 수 있습니다
-- 관련있는 조항이라면 모두 선택해야 합니다
-- 명확히 관련없는 조항, 또는 유사한듯 보이나 사실상 다른 맥락을 다루는 조항은 제외하세요
-
-**응답 형식** (조항 ID만 나열):
-선택된 조항: 제1조, 제3조, 제5조
-"""
-
-        return prompt
+    # _build_selection_prompt 메서드는 A1의 MatchingVerifier로 이동됨
 
     def _build_multi_comparison_prompt(
         self,
@@ -619,50 +453,7 @@ class ContentComparator:
 
         return prompt
 
-    def _parse_selection_response(
-        self,
-        response_text: str,
-        standard_chunks_list: List[List[Dict[str, Any]]]
-    ) -> List[str]:
-        """
-        조항 선택 응답 파싱
-
-        Args:
-            response_text: LLM 응답 텍스트
-            standard_chunks_list: 표준계약서 조항들의 청크 리스트
-
-        Returns:
-            선택된 조항 ID 리스트
-        """
-        import re
-
-        # 가능한 모든 조항 ID 추출
-        available_ids = set()
-        for chunks in standard_chunks_list:
-            if chunks and chunks[0].get('parent_id'):
-                available_ids.add(chunks[0].get('parent_id'))
-
-        # 응답에서 조항 ID 패턴 찾기 (제N조)
-        pattern = r'제\d+조'
-        found_ids = re.findall(pattern, response_text)
-
-        # 실제 존재하는 ID만 필터링
-        selected_ids = [id for id in found_ids if id in available_ids]
-
-        # 중복 제거 및 순서 유지
-        seen = set()
-        result = []
-        for id in selected_ids:
-            if id not in seen:
-                seen.add(id)
-                result.append(id)
-
-        # 아무것도 선택되지 않았으면 모든 후보 반환
-        if not result:
-            logger.warning(f"  응답에서 조항 ID를 파싱할 수 없음, 모든 후보 반환")
-            result = list(available_ids)
-
-        return result
+    # _parse_selection_response 메서드는 A1의 MatchingVerifier로 이동됨
 
     def _build_single_comparison_prompt(
         self,
